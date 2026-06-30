@@ -4,7 +4,7 @@ import logging
 from domd_xyz.embed_molecule import embed_molecule
 from domd_topology.reactor import Reactor
 from domd_topology.functions import set_molecule_id_for_h
-from misc.parser import mols_to_nxgraphs, nxgraphs_to_mols, read_cg_topology
+from misc.parser import read_cg_topology, post_process_aa_mol
 from misc.io.xml import XmlParser
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,6 @@ def build_aa_topology(mols_config, reaction_template, xml_path, reactions=None, 
     # 1. Extract box info and convert to Angstroms
     box_coords = (xml.box.lx, xml.box.ly, xml.box.lz, xml.box.xy, xml.box.xz, xml.box.yz)
     box_tensor = np.array(tuple(map(float, box_coords)))[:3] * 10
-    box_tensor_str = ' '.join([str(l) for l in box_tensor] + ['0']*6)
 
     # 3. Parse coarse-grained topology
     cg_sys, cg_mols = read_cg_topology(xml, mols_config)
@@ -71,19 +70,7 @@ def build_aa_topology(mols_config, reaction_template, xml_path, reactions=None, 
             aa_mol_h.AddConformer(conf, assignId=True)
 
         # 7. Extract and inject metadata: resname, res_id, box_tensor
-        res_name = []
-        res_id = []
-        for a in aa_mol_h.GetAtoms():
-            res_id.append(a.GetIntProp("global_res_id"))
-            res_name.append(a.GetProp("res_name"))
-        res_name_str = ' '.join(res_name)
-        res_num_str = ' '.join(map(str, res_id))
-
-
-        # Best for native RDKit compatibility (only supports strings/ints).
-        aa_mol_h.SetProp("RES_NAMES", res_name_str)
-        aa_mol_h.SetProp("RES_NUMS", res_num_str)
-        aa_mol_h.SetProp("BOX_TENSOR", box_tensor_str)
+        aa_mol_h = post_process_aa_mol(aa_mol_h, box_tensor)
 
 
         final_rdmols.append(aa_mol_h)

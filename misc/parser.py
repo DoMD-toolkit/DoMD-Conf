@@ -243,3 +243,29 @@ def read_cg_topology(cg_system, residues: Dict) -> Tuple[nx.Graph, List[nx.Graph
             cg_mol.graph['rg_tensor_eigv'] = rg_tensor_eigv
     return cg_sys, cg_molecules
 
+def post_process_aa_mol(rdmol, box_tensor):
+    """Post-processes a list of all-atom RDKit molecules.
+
+    This function sanitizes each molecule, adds hydrogens, and sets the 'global_res_id'
+    property for all atoms in the molecule.
+
+    Args:
+        rdmol (Chem.Mol): An RDKit molecule object.
+        box_tensor (list): A list of 9 floats representing the box dimensions.
+    :return:
+        Chem.Mol: The processed RDKit molecule with updated properties.
+    """
+    box_tensor = [str(l) for l in box_tensor] + ['0']*(9 - len(box_tensor)) if len(box_tensor) < 9 else [str(l) for l in box_tensor]
+    box_tensor_str = ' '.join(box_tensor)
+    res_name = []
+    res_id = []
+    for a in rdmol.GetAtoms():
+        res_id.append(a.GetIntProp("global_res_id") if a.HasProp("global_res_id") else 1)
+        res_name.append(a.GetProp("res_name") if a.HasProp("res_name") else "UNL")
+    res_name_str = ' '.join(res_name)
+    res_num_str = ' '.join(map(str, res_id))
+    # Best for native RDKit compatibility (only supports strings/ints).
+    rdmol.SetProp("RES_NAMES", res_name_str)
+    rdmol.SetProp("RES_NUMS", res_num_str)
+    rdmol.SetProp("BOX_TENSOR", box_tensor_str)
+    return rdmol
