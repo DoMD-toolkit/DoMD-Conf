@@ -1,2 +1,2 @@
 # DoMD-Topo
-topology builder of ChemFAST (DoMD-toolkit)
+Topology builder of ChemFAST (DoMD-toolkit)
