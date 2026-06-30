@@ -22,8 +22,8 @@ A lightweight "Chemical Compilation" engine driven by the SMILES/SMARTS-driven C
 ### Installation
 
 ```bash
-conda create -n domd_env -c conda-forge python numpy rdkit openbabel networkx scipy
-conda activate domd_env
+conda create -n domd-toolkit -c conda-forge python==3.12 nomkl numpy rdkit=2025.03.6 openbabel numba networkx pandas scipy jupyter scikit-learn matplotlib MDAnalysis
+conda activate domd-toolkit
 ```
 
 ### Core API Example
