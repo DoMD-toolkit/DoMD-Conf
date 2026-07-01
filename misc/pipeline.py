@@ -2,10 +2,8 @@ import numpy as np
 from rdkit import Chem
 import logging
 from domd_xyz.embed_molecule import embed_molecule
-from domd_topology.reactor import Reactor
-from domd_topology.functions import set_molecule_id_for_h
-from misc.parser import read_cg_topology, post_process_aa_mol
-from misc.io.xml import XmlParser
+from domd_topology.topology_builder import topology_builder
+from misc.parser import post_process_aa_mol, parse_cg_xml_topology
 logger = logging.getLogger(__name__)
 
 
@@ -20,61 +18,28 @@ def build_aa_topology(mols_config, reaction_template, xml_path, reactions=None, 
         xml_path (str): Path to the GALAMOST CG XML configuration file.
         reactions (list/tuple, optional): Explicit sequence of reactions.
             If None, infers from the XML bond section.
+        rigid_meta (dict, optional): Metadata for rigid molecules, e.g., {'C': {'rigid_aidxs_map': {...}}}
+        large (int, optional): Threshold for large systems to adjust embedding parameters.
+        chunks_per_d (int, optional): Number of chunks per dimension for embedding large systems.
 
     Returns:
         list[Chem.Mol]: A list of RDKit molecules with conformers and injected metadata.
     """
     logger.info('Parsing CG XML and extracting box dimensions...')
-    xml = XmlParser(xml_path)
 
-    # 1. Extract box info and convert to Angstroms
-    box_coords = (xml.box.lx, xml.box.ly, xml.box.lz, xml.box.xy, xml.box.xz, xml.box.yz)
-    box_tensor = np.array(tuple(map(float, box_coords)))[:3] * 10
-
-    # 3. Parse coarse-grained topology
-    cg_sys, cg_mols = read_cg_topology(xml, mols_config)
-
-    if rigid_meta is not None:
-        for cg_mol in cg_mols:
-            if cg_mol.graph['is_rigid']:
-                mol_type = cg_mol.graph['type']
-                cg_mol.graph['rigid_aidxs_map'] = rigid_meta[mol_type]['rigid_aidxs_map']
-
-    # 4. Infer reaction tuples from XML if not explicitly provided
-    if not reactions:
-        reactions = []
-        if 'bond' in xml.data:
-            for bond in xml.data['bond']:
-                reactions.append((bond[0], bond[1], bond[2]))
-
-    # 5. Reconstruct all-atom (AA) connectivity via Reactor
-    logger.info('Reconstructing AA connectivities via Reactor...')
-    reactor = Reactor(mols_config, reaction_template)
-    aa_mols, meta = reactor.process(cg_mols, reactions)
-
-    # 6. Serial 3D coordinate embedding and metadata injection
+    cg_mols, box_tensor, reactions = parse_cg_xml_topology(xml_path, mols_config, reactions=reactions, rigid_meta=rigid_meta)
+    # 5. Serial 3D coordinate embedding and metadata injection
     final_rdmols = []
 
-    for i, aa_mol in enumerate(aa_mols):
-        # Sanitize structure and add hydrogens
-        Chem.SanitizeMol(aa_mol)
-        aa_mol_h = Chem.AddHs(aa_mol)
-        set_molecule_id_for_h(aa_mol_h)
-
-        # Fragment embedding (using default safe thresholds for large systems)
-        cg_mol = cg_mols[i]
-        conf = embed_molecule(aa_mol_h, cg_mol, box=box_tensor, large=large, chunk_per_d=chunks_per_d)
-
-        # Ensure the generated conformer is attached to the molecule
-        if aa_mol_h.GetNumConformers() == 0 and conf is not None:
-            aa_mol_h.AddConformer(conf, assignId=True)
-
-        # 7. Extract and inject metadata: resname, res_id, box_tensor
+    for i, cg_mol in enumerate(cg_mols):
+        # Topology building
+        aa_mol_h, aa_graph = topology_builder(mols_config, reaction_template, cg_mol, mol_idx=i)
+        # Molecule embedding (using default safe thresholds for large systems)
+        aa_mol_h, aa_graph = embed_molecule(aa_mol_h, cg_mol, aa_graph, box=box_tensor, large=large, chunk_per_d=chunks_per_d)
+        # SDF format post processing, inject metadata: resname, res_id, box_tensor
         aa_mol_h = post_process_aa_mol(aa_mol_h, box_tensor)
-
-
         final_rdmols.append(aa_mol_h)
-        logger.info(f'Successfully processed molecule {i+1} / {len(aa_mols)}')
+        logger.info(f'Successfully processed molecule {i+1} / {len(cg_mols)}')
 
     return final_rdmols
 

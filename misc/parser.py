@@ -1,10 +1,10 @@
-from typing import Union, Tuple, Dict, List
 from rdkit import Chem
 import numpy as np
 from misc.logger import logger, DuplicateFilter
 import tqdm
 import networkx as nx
-
+from typing import Dict, List, Tuple, Any, Optional, Union
+from misc.io.xml import XmlParser
 bondorder_to_type = {
         0: Chem.rdchem.BondType.UNSPECIFIED,
         1: Chem.rdchem.BondType.SINGLE,
@@ -42,17 +42,24 @@ def mols_to_nxgraphs(molecules: List[Union[Chem.Mol, Chem.RWMol]]):
                 mol_meta.add_node(i, element =ai.GetSymbol(),
                                      atomic_num = ai.GetAtomicNum(),
                                      mass =ai.GetMass(),
-                                     charge =ai.GetFormalCharge(),
+                                     formal_charge =ai.GetFormalCharge(),
                                      is_aromatic=ai.GetIsAromatic(),
                                      res_name =ai.GetProp('res_name'),
                                      res_id =ai.GetIntProp('res_id'),
-                                     global_res_id =ai.GetIntProp('global_res_id')
+                                     global_res_id =ai.GetIntProp('global_res_id'),
+                                     chiral_tag = ai.GetChiralTag(),
+                                     hybridization = ai.GetHybridization(),
+                                     radical_electrons = ai.GetNumRadicalElectrons(),
+                                     isotope = ai.GetIsotope()
                                 )
-
         for bond in tqdm.tqdm(mol.GetBonds(),total=mol.GetNumBonds(),desc='adding bonds', disable=tqdm_show):
             ai, aj = bond.GetBeginAtom(), bond.GetEndAtom()
             i, j = ai.GetIdx(), aj.GetIdx()
-            mol_meta.add_edge(i,j, bondorder=bond.GetBondTypeAsDouble())
+            mol_meta.add_edge(i, j, bond_type=bond.GetBondType(),
+                                    bondorder = bond.GetBondTypeAsDouble(),
+                                    bond_stereo = bond.GetStereo(),
+                                    bond_dir = bond.GetBondDir(),
+                                    stereo_atoms = list(bond.GetStereoAtoms()))
         mols_meta.append(mol_meta)
     return mols_meta
 
@@ -76,7 +83,7 @@ def nxgraphs_to_mols(mols_meta: List[nx.Graph]):
         for n in g.nodes:
             atom = Chem.Atom(nodes[n]['atomic_num'])
             atom.SetIsAromatic(nodes[n]['is_aromatic'])
-            atom.SetFormalCharge(nodes[n]['charge'])
+            atom.SetFormalCharge(nodes[n]['formal_charge'])
             atom.SetIntProp('res_id',nodes[n]['res_id'])
             atom.SetIntProp('global_res_id',nodes[n]['global_res_id'])
             atom.SetProp('res_name',nodes[n]['res_name'])
@@ -269,3 +276,66 @@ def post_process_aa_mol(rdmol, box_tensor):
     rdmol.SetProp("RES_NUMS", res_num_str)
     rdmol.SetProp("BOX_TENSOR", box_tensor_str)
     return rdmol
+
+
+
+def parse_cg_xml_topology(
+    xml_path: str,
+    mols_config: Dict[str, Any],
+    reactions: Dict = None,
+    rigid_meta: Optional[Dict[str, Any]] = None
+) -> Tuple[List[nx.Graph], np.ndarray, Dict[int, List[Tuple[str, int, int]]]]:
+    """
+    CG XML Parser Workshop: Extracts box dimensions, builds coarse-grained molecular graphs,
+    maps rigid-body metadata, and infers linking reactions from the raw XML layout.
+
+    Args:
+        xml_path (str): Path to the GALAMOST CG .xml configuration file.
+        mols_config (dict): Configuration mapping CG bead types to their atomic SMILES definitions.
+        reactions (list, optional): Explicit ordered sequence of reactions.
+            If None, infers automatically from XML bonds.
+        rigid_meta (dict, optional): External tracking dictionary containing 'rigid_aidxs_map' configurations.
+
+    Returns:
+        Tuple[List[nx.Graph], np.ndarray, List[Tuple[int, int, int]]]:
+            - cg_mols: Pre-processed list of NetworkX graphs representing coarse-grained molecules.
+            - box_tensor: NumPy array containing 3D simulation box lengths [Lx, Ly, Lz] in Angstroms.
+            - reactions: Finalized execution sequence of reaction tuples (atom_i, atom_j, bond_type).
+    """
+    logger.info(f"Parsing CG XML file from layout reference: '{xml_path}'...")
+    xml = XmlParser(xml_path)
+
+    # 1. Extract dimensional configurations and scale to standard Angstrom units
+    box_coords = (xml.box.lx, xml.box.ly, xml.box.lz, xml.box.xy, xml.box.xz, xml.box.yz)
+    box_tensor = np.array(tuple(map(float, box_coords)))[:3] * 10
+
+    # 2. Extract baseline system entities and local molecule subgraphs
+    cg_sys, cg_mols = read_cg_topology(xml, mols_config)
+
+    # 3. Complement rigid-body topologies with structural map indexes if provided
+    if rigid_meta is not None:
+        for cg_mol in cg_mols:
+            if cg_mol.graph.get('is_rigid', False):
+                mol_type = cg_mol.graph.get('type')
+                if mol_type in rigid_meta:
+                    cg_mol.graph['rigid_aidxs_map'] = rigid_meta[mol_type]['rigid_aidxs_map']
+                else:
+                    logger.warning(
+                        f"Rigid flag detected for type '{mol_type}', "
+                        f"but target metadata was omitted inside rigid_meta specifications."
+                    )
+
+    # 4. Infer operational transaction logic from XML bonds tracking if explicit sequence is missing
+    if not reactions:
+        reactions = {}
+        for i, cg_mol in enumerate(cg_mols):
+            reactions[i] = []
+            for bond in cg_mol.edges(data=True):
+                node_i, node_j = bond[0], bond[1]
+                bond_type = bond[2].get('bond_type')
+                reactions[i].append((bond_type, node_i, node_j))
+        logger.info(f"Inferred {len(reactions)} reaction connections directly from the XML bond matrix.")
+    else:
+        logger.info(f"Using {len(reactions)} explicitly provided reaction parameters.")
+
+    return cg_mols, box_tensor, reactions

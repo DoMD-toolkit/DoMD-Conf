@@ -1,7 +1,5 @@
 from typing import Union
-
 from rdkit import Chem
-
 
 def divide_into_molecules(aa_system):
     """Divides a molecular system into individual connected components.
@@ -48,3 +46,4 @@ def set_molecule_id_for_h(molecule: Union[Chem.RWMol, Chem.Mol]) -> Union[Chem.R
                     nbr_atom.SetIntProp("global_res_id", atom.GetIntProp("global_res_id"))
                     nbr_atom.SetProp('res_name', atom.GetProp('res_name'))
     return molecule
+

@@ -1,340 +1,320 @@
-from typing import Union, Any, Dict
-
 import networkx as nx
 import numpy as np
 from rdkit import Chem
-from rdkit.Chem import AllChem
-import tqdm
-from domd_xyz.embed import embd, Meta, optimize_res_orientation
+from typing import Dict, List, Tuple
+from domd_xyz.embed.optimize_orientation import Meta, optimize_res_orientation
 from misc.logger import logger
-from scipy.stats import circmean
-import numba as nb
+from domd_xyz.embed.embed_with_cg_xyz import (
+    generate_local_fragment_coords,
+    analyze_topology,
+    get_best_alignment,
+    rotate_confs,
+    pbc
+)
 
-@nb.jit(nopython=True)
-def pbc(x,l):
-    """Applies periodic boundary conditions to a coordinate or vector.
 
-        Args:
-            x (float or np.ndarray): Input coordinate.
-            l (float or np.ndarray): Box length(s).
-
-        Returns:
-            float or np.ndarray: The wrapped coordinate within [-l/2, l/2].
+def assemble_and_stitch_system(
+        molecule: Chem.Mol,
+        molecule_graph: nx.Graph,
+        cg_graph: nx.Graph,
+        local2atoms: Dict[int, List[int]],
+        all_local_coords: Dict[int, np.ndarray],
+        box: np.ndarray,
+        chunks_per_d: int
+) -> Chem.Conformer:
     """
-    return x - l*np.rint(x/l)
+    Workshop E: Global Stitching Aligner. Solves orientation optimization matrices,
+    executes global 3D rotations/translations, and commits coordinates to a new conformer.
+    """
+    n_residues = len(local2atoms)
+    bonds = []
+    local_frame_idx = []
 
-def get_best_alignment(coords_A, coords_B, box):
-    r"""Aligns molecule B to molecule A by minimizing RMSD under PBC.
+    # 1. Parse inter-residue connecting bonds to construct topological linkers metadata
+    for bond in molecule.GetBonds():
+        u = bond.GetBeginAtomIdx()
+        v = bond.GetEndAtomIdx()
+        res_u = molecule_graph.nodes[u]['res_id']
+        res_v = molecule_graph.nodes[v]['res_id']
 
-    This function performs a rigid body alignment (rotation and translation) using
-    Principal Component Analysis (PCA) on the gyration tensors. It resolves the
-    eigenvector sign ambiguity by exhaustively checking all axis permutations.
+        # Identify cross-boundary linkages spanning between different residues
+        if res_u != res_v:
+            bonds.append((res_u, res_v))
+            local_frame_idx.append((u, v))
 
-    The algorithm proceeds as follows:
+    # 2. Extract target mapping translation vectors from normalized CG template positions
+    trans = np.zeros((n_residues, 3))
+    for node in cg_graph.nodes:
+        local_res_id = cg_graph.nodes[node]['local_res_id']
+        trans[local_res_id] = cg_graph.nodes[node].get("x")
 
-    1.  **Centering**: Compute the Center of Mass (COM) for both molecules using
-        circular mean to handle Periodic Boundary Conditions (PBC).
-        .. math::
-            X_{centered} = X - \text{COM}(X)
-    2.  **Gyration Tensor**: Compute the covariance matrix (Gyration Tensor) roughly
-        representing the moment of inertia.
+    # 3. Flatten compiled atomic properties into arrays for Numba/SciPy performance loops
+    atom_pos_initial = np.zeros((molecule.GetNumAtoms(), 3))
+    atom_res_ids = np.zeros(molecule.GetNumAtoms(), dtype=np.int64)
 
-        .. math::
-            R_g = \frac{1}{N} X_{centered}^T X_{centered}
+    for g_id, coord in all_local_coords.items():
+        atom_pos_initial[g_id] = coord
+        atom_res_ids[g_id] = molecule_graph.nodes[g_id]['res_id']
 
-    3.  **Eigendecomposition**: Obtain the principal axes (eigenvectors $V$) by decomposing $R_g$.
+    # 4. Initialize structural meta descriptors block
+    meta = Meta(
+        np.array(bonds, dtype=np.int64),
+        trans,
+        np.array(local_frame_idx, dtype=np.int64),
+        atom_pos_initial,
+        atom_res_ids,
+        box
+    )
 
-        .. math::
-            R_g = V \Lambda V^T
+    # 5. Invoke numerical solver to optimize rotational orientation matrices
+    logger.info("Solving analytical rotation matrices across localized boundaries...")
+    rot = optimize_res_orientation(n_residues, meta, chunk_per_d=chunks_per_d)
 
-    4.  **Optimal Rotation Search**: Construct candidate rotation matrices $R$ by mapping
-        the principal axes of B ($V_B$) to A ($V_A$), iterating through all possible
-        sign flips $S$ (diagonal matrix with $\pm 1$).
+    # 6. Stitching Pass: Map final rigid transformation [Coord * Rot.T + Trans] under PBC limits
+    final_conformer = Chem.Conformer()
+    for local_res_id, atom_ids in local2atoms.items():
+        for g_id in atom_ids:
+            # Perform rigid matrix rotation based on optimized orientation directions
+            rotated_coord = rot[local_res_id].dot(all_local_coords[g_id])
+            # Translate directly to the matched Coarse-Grained space target coordinate
+            final_global_coord = rotated_coord + trans[local_res_id]
 
-        .. math::
-            R = V_A \cdot S \cdot V_B^T
+            # Commit wrapped PBC position straight into the RDKit conformer storage
+            final_conformer.SetAtomPosition(g_id, pbc(final_global_coord, box))
 
-        The algorithm selects the $R$ that minimizes the Root Mean Square Deviation (RMSD)
-        and ensures a proper rotation ($\det(R) = 1$).
+    return final_conformer
+
+def embed_rigid(molecule: Chem.Mol,
+                cg_molecule: nx.Graph,
+                local2atoms: Dict[int, List[int]],
+                box: np.ndarray) -> Chem.Mol:
+    """
+    Rigid Aligner Workshop: Rigidity-preserving alignment using unified topology metadata.
+
+    Calculates virtual geometric centers of all-atom residues based on 'local2atoms',
+    aligns them via PCA/RMSD optimization to target CG coordinates, and maps the
+    transformation globally across the rigid molecule.
 
     Args:
-        coords_A (np.ndarray): Coordinates of the reference molecule A, shape (N, 3).
-        coords_B (np.ndarray): Coordinates of the mobile molecule B, shape (N, 3).
-        box (np.ndarray): Simulation box dimensions [Lx, Ly, Lz] for PBC handling.
+        molecule (Chem.Mol): All-atom RDKit molecule with an initial conformation.
+        cg_molecule (nx.Graph): Coarse-grained graph containing target coordinates 'x'.
+        local2atoms (Dict[int, List[int]]): Mapping of local_res_id -> atom indices.
+        box (np.ndarray): Simulation box dimensions for PBC wrapping.
 
     Returns:
-        tuple: A tuple containing:
-            - best_rotated_B (np.ndarray): The aligned coordinates of B.
-            - best_R (np.ndarray): The optimal 3x3 rotation matrix.
-            - best_rmsd (float): The minimum RMSD achieved.
-            - comA (np.ndarray): The center of mass of A (used for final translation).
+        np.ndarray: The finalized, aligned 3D coordinates for all atoms.
     """
-    nA, D = coords_A.shape
-    comA = np.array([circmean(coords_A[:,i:i+1],low=-box[i]/2.,high=box[i]/2.,axis=0) for i in range(D)]).ravel()
-    comB = np.array([circmean(coords_B[:,i:i+1],low=-box[i]/2.,high=box[i]/2.,axis=0) for i in range(D)]).ravel()
-    cA = pbc(coords_A - comA,box)# coords_A- np.mean(coords_A, axis=0)
-    cB = pbc(coords_B - comB,box) #coords_B - np.mean(coords_B, axis=0)
-
-    RgA = np.dot(cA.T, cA) / len(cA)
-    RgB = np.dot(cB.T, cB) / len(cB)
-
-    def get_sorted_eigenvectors(rg_tensor):
-        vals, vecs = np.linalg.eigh(rg_tensor)
-        idx = np.argsort(vals)[::-1]
-        return vecs[:, idx]
-
-    VA = get_sorted_eigenvectors(RgA)
-    VB = get_sorted_eigenvectors(RgB)
-
-    best_rmsd = float('inf')
-    best_rotated_B = None
-    best_R = None
-    
-    import itertools
-    for signs in itertools.product([1, -1], repeat=3):
-        sign_mat = np.diag(signs)
-        
-        R_candidate = VA @ sign_mat @ VB.T
-        
-        if np.isclose(np.linalg.det(R_candidate), 1.0):
-            rotated_B = np.dot(cB, R_candidate.T)
-            
-            diff = cA - rotated_B
-            rmsd = np.sqrt(np.mean(diff**2))
-            
-            if rmsd < best_rmsd:
-                best_rmsd = rmsd
-                best_rotated_B = rotated_B
-                best_R = R_candidate
-
-    return best_rotated_B, best_R, best_rmsd, comA
-def rotate_confs(pos,R,box,com_TP):
-    """Applies a rotation and translation to a set of coordinates under PBC.
-
-        Args:
-            pos (np.ndarray): Input coordinates (N, 3).
-            R (np.ndarray): Rotation matrix (3, 3).
-            box (np.ndarray): Box dimensions.
-            com_TP (np.ndarray): Target center of mass position (translation vector).
-
-        Returns:
-            np.ndarray: Transformed coordinates.
-    """
-    N,D = pos.shape
-    com = np.array([circmean(pos[:,i:i+1],low=-box[i]/2.,high=box[i]/2.,axis=0) for i in range(D)]).ravel()
-    cA = pbc(pos - com,box)
-    r_cA = np.dot(cA, R.T)
-    return r_cA + com_TP
-
-
-def embed_rigid(molecule:Union[Chem.Mol, Chem.RWMol],
-        cg_molecule: Union[nx.Graph, None] = None, rigid_aidxs: Dict[int, str] = None, box=None): 
-    """Embeds a rigid molecule by aligning it to the Coarse-Grained (CG) bead positions.
-
-        Takes an initial all-atom conformation, calculates the centers of the groups of atoms
-        corresponding to each CG bead, and then rigidly rotates/translates the entire molecule
-        to best match the target CG configuration.
-
-        Args:
-            molecule (Union[Chem.Mol, Chem.RWMol]): The all-atom molecule with an initial conformation.
-            cg_molecule (Union[nx.Graph, None], optional): The coarse-grained graph containing target positions. Defaults to None.
-            rigid_aidxs (Dict[int, str], optional): Mapping from CG bead index to list of atom indices. Defaults to None.
-            box (np.ndarray, optional): Simulation box dimensions. Defaults to None.
-
-        Returns:
-            np.ndarray: The new positions of the atoms.
-    """
+    # 1. Fetch the raw initial all-atom coordinates
     conf = molecule.GetConformer(0)
-    aa_pos = conf.GetPositions()# * 0.1
+    aa_pos = conf.GetPositions()
+
     aa_rigid_pos = []
-    for i in rigid_aidxs:
-        aidxs = rigid_aidxs[i]
-        aa_rigid_pos.append(np.mean(aa_pos[aidxs],axis=0))
-    aa_rigid_pos = np.array(aa_rigid_pos)
-    aa_cm = aa_pos.mean(axis=0)
     cg_rigid_pos = []
-    for i in cg_molecule.nodes:
-        cg_rigid_pos.append(cg_molecule.nodes[i]['x'])
+
+    # 2. Extract paired coordinates, strictly anchored by CG node order to guarantee alignment
+    for node in cg_molecule.nodes:
+        # Fetch target CG position
+        cg_rigid_pos.append(cg_molecule.nodes[node]['x'])
+
+        # Fetch corresponding initial AA atom positions using our standardized local_res_id
+        local_res_id = cg_molecule.nodes[node]['local_res_id']
+        atom_indices = local2atoms[local_res_id]
+
+        # Calculate the geometric mean position of this residue in initial AA space
+        aa_rigid_pos.append(np.mean(aa_pos[atom_indices], axis=0))
+
+    # Convert to standard NumPy arrays for high-performance matrix operations
     cg_rigid_pos = np.array(cg_rigid_pos)
-    best_rotated_B, best_R, best_rmsd, com = get_best_alignment(cg_rigid_pos, aa_rigid_pos, box)
-    #print(com)
-    return pbc(rotate_confs(aa_pos,best_R, box, com),box)#(np.dot(aa_pos, best_R.T) + com)*10 # unit Angstrom
+    aa_rigid_pos = np.array(aa_rigid_pos)
+
+    # 3. Perform rigid-body optimization (Rotation & Translation search)
+    # get_best_alignment and rotate_confs remain identical to your mathematical primitives
+    _, best_R, _, target_com = get_best_alignment(cg_rigid_pos, aa_rigid_pos, box)
+
+    # 4. Apply transformation globally to all constituent atoms and wrap via PBC
+    transformed_aa_pos = rotate_confs(aa_pos, best_R, box, target_com)
+    conf = Chem.Conformer()
+    r_aa_pos = pbc(transformed_aa_pos, box)
+    for i, p in enumerate(r_aa_pos):
+        conf.SetAtomPosition(i, p)
+    #if molecule.GetNumConformers() == 0 and conf is not None:
+    #    molecule.AddConformer(conf, assignId=True)
+    return conf
 
 
-def embed_molecule(molecule: Union[Chem.Mol, Chem.RWMol],
-                   cg_molecule: Union[nx.Graph, None] = None,
-                   box=None, large=500, chunk_per_d=1, custom_confs=None, custom_fragment_confs = None) -> Any:
-    """Generates 3D coordinates for a large molecule based on a Coarse-Grained template.
-
-        This function performs a hierarchical embedding:
-        1.  **Fragmentation**: Splits the molecule into residues based on `res_id`.
-        2.  **Local Embedding**: Generates conformations for each residue (fragment).
-        3.  **Orientation Optimization**: Rotates each residue to align bonded atoms with
-            the vector connecting the corresponding CG beads.
-        4.  **Assembly**: Translates residues to the CG bead positions.
-
-
-
-        Args:
-            molecule (Union[Chem.Mol, Chem.RWMol]): The all-atom topology (RDKit molecule).
-            cg_molecule (Union[nx.Graph, None], optional): The CG graph with 'x' coordinates. Defaults to None.
-            box (np.ndarray, optional): Box dimensions. Defaults to None.
-            large (int, optional): Threshold for "large" molecule handling. Defaults to 500.
-            chunk_per_d (int, optional): Optimization parameter for orientation. Defaults to 1.
-            custom_confs (optional): Unused. Defaults to None.
-            custom_fragment_confs (optional): Unused. Defaults to None.
-
-        Returns:
-            Chem.Conformer: The generated RDKit conformer with 3D coordinates.
+def embed_by_fragment(
+        molecule: Chem.Mol,
+        molecule_graph: nx.Graph,
+        cg_graph: nx.Graph,
+        local2atoms: Dict[int, List[int]],
+        box: np.ndarray,
+        chunks_per_d: int = 1
+) -> Chem.Conformer:
     """
-    _no_res_id = False
-    _residue_map = {}
-    ret = None
-    for atom in molecule.GetAtoms():
-        if 'res_id' not in atom.GetPropNames():
-            _no_res_id = True
-            logger.warning(f"No res_id property found in atom {atom.GetIdx()}, {atom.GetSymbol()} "
-                           "the whole molecule is considered as one residue.")
-    if _no_res_id:
-        for atom in molecule.GetAtoms():
-            atom.SetIntProp("res_id", 0)
+    Specialized Fragment Solver. Only invoked for non-rigid, large macromolecular systems.
+    Orchestrates sequential fragment embedding and global spatial stitching.
 
-    for atom in molecule.GetAtoms():
-        if not _residue_map.get(atom.GetIntProp("res_id")):
-            _residue_map[atom.GetIntProp("res_id")] = set()
-        _residue_map[atom.GetIntProp("res_id")].add(atom.GetIdx())
+    Args:
+        molecule (Chem.Mol): All-atom RDKit molecule topology.
+        molecule_graph (nx.Graph): Global all-atom molecular network metadata.
+        cg_graph (nx.Graph): Coarse-grained graph configuration layout.
+        local2atoms (Dict[int, List[int]]): Standardized mapping of local_res_id -> atom indices.
+        box (np.ndarray): Simulation box bounds.
+        chunks_per_d (int, default 1): Spatial grid slicing factor for orientation optimization.
 
-    if _no_res_id:
-        logger.warning("The entire molecule is considered "
-                       "as one residue, for large molecules "
-                       "this may cause problems.")
-        if len(cg_molecule) > 1 and not cg_molecule.graph['is_rigid']:
-            logger.error("The ref CG molecule contains more than 1"
-                         " residues but the whole aa molecule is considered as one residue")
-        return
-    if cg_molecule.graph['is_rigid']:
-        logger.info("Embedding rigid molecule")
-        ret = Chem.Conformer()
-        rigid_aidxs_map = cg_molecule.graph['rigid_aidxs_map']
-        r_aa_pos = embed_rigid(molecule, cg_molecule, rigid_aidxs_map, box)
-        for i,p in enumerate(r_aa_pos):
-            ret.SetAtomPosition(i, p)
-        return ret
+    Returns:
+        Chem.Conformer: The finalized, fully stitched 3D conformer for the large system.
+    """
+    logger.info("Executing specialized fragment-based embedding workflow for large system.")
+    all_local_coords: Dict[int, np.ndarray] = {}
+    adj_dict = dict(cg_graph.adjacency())
 
-    if cg_molecule is None:
-        logger.warning("There is no ref CG info, so that the whole molecule is generated at once."
-                       " This may be slow or fail for large molecule (e.g., >500)")
+    # 1. Sequentially drive fragment generators across every coarse-grained residue node
+    for cg_node in cg_graph.nodes:
+        local_res_id = cg_graph.nodes[cg_node]['local_res_id']
 
-        conf_id = AllChem.EmbedMolecule(molecule, useRandomCoords=True)
-        if conf_id == -1:
-            logger.error("Configuration generation failed!")
-        ret = molecule.GetConformer(conf_id)
+        # Discover neighboring residues mapped as CG node index keys
+        neighbor_cg_nodes = list(adj_dict[cg_node].keys())
+        neighbor_local_ids = [cg_graph.nodes[nb]['local_res_id'] for nb in neighbor_cg_nodes]
+
+        # Generate local zero-centered coordinates for this specific fragment block
+        residue_local_coords = generate_local_fragment_coords(
+            molecule, molecule_graph, local2atoms, local_res_id, neighbor_local_ids
+        )
+        all_local_coords.update(residue_local_coords)
+
+    # 2. Invoke Workshop E to optimize orientations and sew the fragments together in global space
+    final_conformer = assemble_and_stitch_system(
+        molecule, molecule_graph, cg_graph, local2atoms, all_local_coords, box, chunks_per_d
+    )
+    #if molecule.GetNumConformers() == 0 and conf is not None:
+    #    molecule.AddConformer(final_conformer, assignId=True)
+    return final_conformer
+
+
+def embed_by_etkdg(
+        molecule: Chem.Mol,
+        cg_molecule: nx.Graph,
+        molecule_graph: nx.Graph,
+        local2atoms: Dict[int, List[int]],
+        box: np.ndarray,
+        chunk_per_d: int = 1
+) -> Chem.Conformer:
+    """
+    Standard ETKDG Solver. Only invoked for non-rigid systems smaller than the 'large' threshold.
+    Generates initial global coordinates via ETKDG, then applies global alignment stitching.
+
+    Args:
+        molecule (Chem.Mol): All-atom RDKit molecule topology.
+        cg_molecule (nx.Graph): Coarse-grained graph template.
+        molecule_graph (nx.Graph): Global all-atom molecular network metadata.
+        local2atoms (Dict[int, List[int]]): Mapping of local_res_id -> atom indices.
+        box (np.ndarray): Simulation box bounds.
+        chunk_per_d (int, default 1): Spatial grid slicing factor for orientation optimization.
+
+    Returns:
+        Chem.Conformer: The finalized, aligned 3D conformer for the small system.
+    """
+    conf_id = -1
+    attempts = 10000
+
+    # Determine if random coordinates are needed based on structural chiral centers
+    has_chiral = any(
+        len(AllChem.FindMolChiralCenters(Chem.AddHs(Chem.MolFromSmiles(cg_molecule.nodes[n]['smiles'])))) > 0
+        for n in cg_molecule.nodes
+    )
+    use_random = not has_chiral
+
+    # Iterative global distance geometry embedding loop
+    while conf_id == -1:
+        conf_id = AllChem.EmbedMolecule(molecule, useRandomCoords=use_random, maxAttempts=attempts)
+        attempts += 5000
+
+    base_conf = molecule.GetConformer(conf_id)
+
+    # Normalize fragments at origin to match the global stitcher's protocol
+    _center_residues_at_origin(molecule, local2atoms, base_conf)
+    all_local_coords = {a.GetIdx(): np.array(base_conf.GetAtomPosition(a.GetIdx())) for a in molecule.GetAtoms()}
+
+    # Pass through the global stitcher to correctly align and translate to CG positions
+    return assemble_and_stitch_system(
+        molecule, molecule_graph, cg_molecule, local2atoms, all_local_coords, box, chunk_per_d
+    )
+
+
+from typing import Tuple
+from misc.logger import logger
+
+
+def embed_molecule(
+        molecule: Chem.Mol,
+        cg_molecule: nx.Graph,
+        molecule_graph: nx.Graph,
+        box: np.ndarray = None,
+        large: int = 500,
+        chunk_per_d: int = 1
+) -> Tuple[Chem.Mol, nx.Graph]:
+    """
+    The Ultimate Top-Level Orchestrator. Standardizes topology maps, routes the system
+    to specialized solvers to fetch a Conformer, updates all properties, and returns both objects.
+
+    Args:
+        molecule (Chem.Mol): All-atom RDKit molecule topology.
+        cg_molecule (nx.Graph): Coarse-grained configuration template layout.
+        molecule_graph (nx.Graph): Global all-atom molecular network metadata.
+        box (np.ndarray, optional): Simulation box dimensions. Fallback provided if None.
+        large (int, default 500): Atom count threshold defining the macro-system boundary.
+        chunk_per_d (int, default 1): Spatial grid subdivisions for optimization.
+
+    Returns:
+        Tuple[Chem.Mol, nx.Graph]:
+            - molecule: Standardized RDKit molecule containing the successfully bound 3D Conformer.
+            - molecule_graph: The molecular graph injected with 3D coordinate tensors under node attribute 'x'.
+    """
+    # Step 1: Execute Workshop A (Topology Analyzer) to standardize unified res_id signatures
+    global2local, local2atoms = analyze_topology(molecule_graph, cg_molecule)
+
+    # Infinite fallback boundary handling if box parameters are omitted
+    if box is None:
+        box = np.ones(3) * 10000.0
+        logger.warning(f"Simulation box bounds missing. Temporarily fallback to: {box}")
+
+    # Step 2: Conformer Extraction Pass via clean 3-way branching logic
+    # --- MODE 1: Rigid-Body Architecture System ---
+    if cg_molecule.graph.get('is_rigid', False):
+        logger.info("Routing system straight into the Rigid Aligner Workshop.")
+        conf = embed_rigid(molecule, cg_molecule, local2atoms, box)
+
+    # --- MODE 2: Small Non-Rigid System (Standard ETKDG Route) ---
+    elif molecule.GetNumAtoms() <= large:
+        logger.info(f"System size ({molecule.GetNumAtoms()} atoms) <= threshold ({large}). Routing to embed_by_etkdg.")
+        conf = embed_by_etkdg(molecule, cg_molecule, molecule_graph, local2atoms, box, chunk_per_d)
+
+    # --- MODE 3: Massive Macromolecular System (Fragment Solver Route) ---
     else:
-        if len(_residue_map) != len(cg_molecule):
-            logger.error("The number of residue in aa molecule is not equal to cg molecule "
-                         f"{len(_residue_map)} != {len(cg_molecule)}")
-            return
-        #--#
-        if molecule.GetNumAtoms()> 1000:
-            logger.info('Embed molecule by using ETKDG ...')
-        conf = embd(molecule, cg_molecule, large=large, custom_conf=None)
-        #print(conf.GetPositions(),'***** after embd *****')
-        #--#
-        if molecule.GetNumAtoms()>1000:
-            logger.info('Embed finished.')
-        if conf is None:
-            return
-        # make residue centered at 0
-        #for res_id in _residue_map:
-        for res_id in tqdm.tqdm(_residue_map,total=len(_residue_map),desc='transition of cg cm',disable=True):
-            atom_ids = _residue_map[res_id]
-            com = np.zeros(3)
-            sam = 0
-            for atom_id in atom_ids:
-                mas = molecule.GetAtomWithIdx(atom_id).GetMass()
-                pos = conf.GetAtomPosition(atom_id)
-                com += np.array([pos.x, pos.y, pos.z]) * mas
-                sam += mas
-            for atom_id in atom_ids:
-                pos = conf.GetAtomPosition(atom_id)
-                conf.SetAtomPosition(atom_id, np.array([pos.x, pos.y, pos.z]) - com / sam)
-            # debug
-            if logger.level <= 10:
-                com = np.zeros(3)
-                sam = 0
-                for atom_id in atom_ids:
-                    mas = molecule.GetAtomWithIdx(atom_id).GetMass()
-                    pos = conf.GetAtomPosition(atom_id)
-                    com += np.array([pos.x, pos.y, pos.z]) * mas
-                    sam += mas
-                logger.debug(f"The com of residue {res_id} is {com / sam}.")
-        # debug
-        if logger.level <= 10:
-            for res_id in _residue_map:
-                debug_xyz = ""
-                debug_xyz += f"{len(_residue_map[res_id])}\n\n"
-                for atom_id in _residue_map[res_id]:
-                    p = conf.GetAtomPosition(atom_id)
-                    atom = molecule.GetAtomWithIdx(atom_id)
-                    debug_xyz += f"{atom.GetSymbol()} {p.x} {p.y} {p.z}\n"
-                logger.debug(f"structure of res {res_id}:\n{debug_xyz}")
+        logger.info(
+            f"System size ({molecule.GetNumAtoms()} atoms) > threshold ({large}). Routing to embed_by_fragment.")
+        conf = embed_by_fragment(molecule, molecule_graph, cg_molecule, local2atoms, box, chunk_per_d)
 
-        atom_pos = conf.GetPositions()
-        atom_res_id = np.array([a.GetIntProp("res_id") for a in molecule.GetAtoms()])
-        n_residue = len(_residue_map)
-        bonds = []
-        trans = np.zeros((n_residue, 3))
-        local_frame_idx = []
-        for bond in molecule.GetBonds():
-            i = bond.GetBeginAtomIdx()
-            j = bond.GetEndAtomIdx()
-            atom_i = molecule.GetAtomWithIdx(i)
-            atom_j = molecule.GetAtomWithIdx(j)
-            res_id_i = atom_i.GetIntProp("res_id")
-            res_id_j = atom_j.GetIntProp("res_id")
-            # print(res_id_i,i,'*',res_id_j,j)
-            if res_id_i != res_id_j:
-                bonds.append((res_id_i, res_id_j))
-                local_frame_idx.append((i, j))
-                # print(i,j)
-        for res_id in _residue_map:
-            for node in cg_molecule.nodes:
-                if cg_molecule.nodes[node].get('local_res_id') == res_id:
-                    trans[res_id] = cg_molecule.nodes[node].get("x")
-        if box is None:
-            box = np.ones(3) * abs(conf.GetPositions().max()) * 100.0
-            logger.info(f"Box is not given. Set to {box} to eliminate pbc.")
-        meta = Meta(np.array(bonds, dtype=np.int64),
-                    trans,
-                    np.array(local_frame_idx, dtype=np.int64),
-                    atom_pos,
-                    atom_res_id,
-                    box)
-        # pickle.dump(meta,open('meta.pkl','wb'))
-        #--#
-        if molecule.GetNumAtoms() > 200:
-            logger.info("Optimizing orientations...")
-        rot = optimize_res_orientation(n_residue, meta, chunk_per_d=chunk_per_d)
-        # rot = np.asarray([np.eye(3),] * n_residue)
-        #--#
-        if molecule.GetNumAtoms() > 200:
-            logger.info(f"Optimize finished.")
-        # debug
-        for ir, r in enumerate(rot):
-            logger.debug(f"Rotation for residue {ir} is {r} and r.T.dot(r) is {r.T.dot(r)}")
-        for res_id in _residue_map:
-            atoms = _residue_map[res_id]
-            for atom_id in atoms:
-                p = rot[res_id].dot(atom_pos[atom_id])
-                # p = conf.GetAtomPosition(atom_id)
-                conf.SetAtomPosition(atom_id, p + trans[res_id])
-        #print(conf.GetPositions(),'**** after optimization ****')
-        ret = Chem.Conformer()
+    # Step 3: Global State Injection
+    if conf is not None:
+        # Clear any residual un-optimized conformation layouts
+        if molecule.GetNumConformers() > 0:
+            molecule.RemoveAllConformers()
+
+        # Commit the generated 3D conformer directly into the RDKit molecule
+        molecule.AddConformer(conf, assignId=True)
+
+        # Extract atomic 3D coordinates and inject them as 'x' attributes into the molecular graph
         for atom in molecule.GetAtoms():
-            pos = conf.GetAtomPosition(atom.GetIdx())
-            p = np.array([pos.x, pos.y, pos.z])
-            ret.SetAtomPosition(atom.GetIdx(), p)
-        #print(ret.GetPositions(), '**** man make conf ****')
-    #print(ret.GetPositions())
-    return ret
+            a_id = atom.GetIdx()
+            pos = conf.GetAtomPosition(a_id)
 
+            # Bound natively as a high-performance 3D NumPy coordinate tensor
+            molecule_graph.nodes[a_id]['x'] = np.array([pos.x, pos.y, pos.z])
+
+        logger.info("Successfully bound Conformer properties and mapped 'x' tensor coordinates into the graph.")
+    else:
+        logger.error("Failed to generate valid geometric parameters across all available workshops.")
+
+    return molecule, molecule_graph
