@@ -1,6 +1,6 @@
 import numpy as np
 from rdkit import Chem
-from misc.pipeline import build_aa_topology, topology_builder
+from misc.pipeline import topology_builder
 from domd_xyz.embed_molecule import embed_molecule
 from misc.logger import logger
 logger.setLevel('INFO')

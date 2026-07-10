@@ -5,6 +5,7 @@ from rdkit.Chem import AllChem
 from typing import Dict, List, Tuple
 from domd_xyz.embed.optimize_orientation import Meta, optimize_res_orientation
 from misc.logger import logger
+from misc.parser import molecule_reader, nxgraphs_to_mols
 from domd_xyz.embed.embed_with_cg_xyz import (
     generate_local_fragment_coords,
     analyze_topology,
@@ -32,9 +33,7 @@ def assemble_and_stitch_system(
     local_frame_idx = []
 
     # 1. Parse inter-residue connecting bonds to construct topological linkers metadata
-    for bond in molecule.GetBonds():
-        u = bond.GetBeginAtomIdx()
-        v = bond.GetEndAtomIdx()
+    for u, v in molecule_graph.edges:
         res_u = molecule_graph.nodes[u]['res_id']
         res_v = molecule_graph.nodes[v]['res_id']
 
@@ -50,8 +49,8 @@ def assemble_and_stitch_system(
         trans[local_res_id] = cg_graph.nodes[node].get("x")
 
     # 3. Flatten compiled atomic properties into arrays for Numba/SciPy performance loops
-    atom_pos_initial = np.zeros((molecule.GetNumAtoms(), 3))
-    atom_res_ids = np.zeros(molecule.GetNumAtoms(), dtype=np.int64)
+    atom_pos_initial = np.zeros((molecule_graph.number_of_nodes(), 3))
+    atom_res_ids = np.zeros(molecule_graph.number_of_nodes(), dtype=np.int64)
 
     for g_id, coord in all_local_coords.items():
         atom_pos_initial[g_id] = coord
@@ -68,7 +67,7 @@ def assemble_and_stitch_system(
     )
 
     # 5. Invoke numerical solver to optimize rotational orientation matrices
-    logger.info("Solving analytical rotation matrices across localized boundaries...")
+    logger.info("Optimize cross-cg-bead rotation matrix...")
     rot = optimize_res_orientation(n_residues, meta, chunk_per_d=chunks_per_d)
 
     # 6. Stitching Pass: Map final rigid transformation [Coord * Rot.T + Trans] under PBC limits
@@ -87,7 +86,6 @@ def assemble_and_stitch_system(
 
 def embed_rigid(molecule: Chem.Mol,
                 cg_molecule: nx.Graph,
-                local2atoms: Dict[int, List[int]],
                 box: np.ndarray) -> Chem.Mol:
     """
     Rigid Aligner Workshop: Rigidity-preserving alignment using unified topology metadata.
@@ -99,7 +97,6 @@ def embed_rigid(molecule: Chem.Mol,
     Args:
         molecule (Chem.Mol): All-atom RDKit molecule with an initial conformation.
         cg_molecule (nx.Graph): Coarse-grained graph containing target coordinates 'x'.
-        local2atoms (Dict[int, List[int]]): Mapping of local_res_id -> atom indices.
         box (np.ndarray): Simulation box dimensions for PBC wrapping.
 
     Returns:
@@ -109,28 +106,23 @@ def embed_rigid(molecule: Chem.Mol,
     conf = molecule.GetConformer(0)
     aa_pos = conf.GetPositions()
 
-    aa_rigid_pos = []
     cg_rigid_pos = []
 
     # 2. Extract paired coordinates, strictly anchored by CG node order to guarantee alignment
     for node in cg_molecule.nodes:
         # Fetch target CG position
         cg_rigid_pos.append(cg_molecule.nodes[node]['x'])
-
-        # Fetch corresponding initial AA atom positions using our standardized local_res_id
-        local_res_id = cg_molecule.nodes[node]['local_res_id']
-        atom_indices = local2atoms[local_res_id]
-
-        # Calculate the geometric mean position of this residue in initial AA space
-        aa_rigid_pos.append(np.mean(aa_pos[atom_indices], axis=0))
-
-    # Convert to standard NumPy arrays for high-performance matrix operations
     cg_rigid_pos = np.array(cg_rigid_pos)
-    aa_rigid_pos = np.array(aa_rigid_pos)
-
     # 3. Perform rigid-body optimization (Rotation & Translation search)
     # get_best_alignment and rotate_confs remain identical to your mathematical primitives
-    _, best_R, _, target_com = get_best_alignment(cg_rigid_pos, aa_rigid_pos, box)
+    body_id = cg_molecule.graph.get('body_id')[0]
+    pairs = cg_molecule.graph.get('rigid_pairs', {}).get(body_id)
+    if pairs is not None:
+        paired_A = pairs['paired_CG']
+        paired_B = pairs['paired_AA']
+    else:
+        paired_A, paired_B = None, None
+    best_R, target_com = get_best_alignment(cg_rigid_pos, aa_pos, box, paired_A=paired_A, paired_B=paired_B)
 
     # 4. Apply transformation globally to all constituent atoms and wrap via PBC
     transformed_aa_pos = rotate_confs(aa_pos, best_R, box, target_com)
@@ -142,6 +134,181 @@ def embed_rigid(molecule: Chem.Mol,
     #    molecule.AddConformer(conf, assignId=True)
     return conf
 
+def embed_hybrid(
+        molecule: Chem.Mol,
+        molecule_graph: nx.Graph,
+        cg_graph: nx.Graph,
+        local2atoms: Dict[int, List[int]],
+        box: np.ndarray,
+        large: int = 500,
+        chunks_per_d: int = 1
+) -> Chem.Conformer:
+    """
+    Specialized Hybrid Solver. Extracts pre-aligned global coordinates for rigid bodies
+    from template layout files, constructs isolated pseudo-flexible topological graphs
+    for the remaining flexible chains plus their junction anchors, and runs analytical
+    stitching optimization.
+    """
+    logger.info("Executing specialized hybrid anchor-and-grow embedding workflow.")
+    all_local_coords: Dict[int, np.ndarray] = {}
+
+    # -----------------------------------------------------------------
+    # Rigid Pre-alignment
+    # -----------------------------------------------------------------
+    rigid_groups = cg_graph.graph.get('rigid_groups', {})
+    rigid_transforms: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
+    rigid_files = cg_graph.graph.get('rigid_files', {})
+    aa_rigid_groups = molecule_graph.graph.get('rigid_groups', {})
+
+    if not aa_rigid_groups:
+        for i in molecule_graph.nodes:
+            body_id = molecule_graph.nodes[i].get('body', -1)
+            if body_id >= 0:
+                aa_rigid_groups.setdefault(body_id, set()).add(i)
+
+    if not aa_rigid_groups:
+        logger.error("No rigid groups detected in the all-atom molecular graph. Cannot proceed.")
+        raise ValueError("No rigid groups detected in the all-atom molecular graph.")
+
+    for body_id, cg_nodes in rigid_groups.items():
+        if body_id == -1:
+            continue
+
+        # get the target CG positions for the current rigid body
+        cg_rigid_pos = np.array([cg_graph.nodes[n]['x'] for n in sorted(cg_nodes)])
+
+        # get the corresponding original all-atom positions for the rigid body
+        aa_rigid_atoms_global = sorted(aa_rigid_groups[body_id])
+        aa_rigid_atoms_intra = np.arange(len(aa_rigid_atoms_global))
+        for global_id, intra_id in zip(aa_rigid_atoms_global, aa_rigid_atoms_intra):
+            molecule_graph.nodes[global_id]['intra_mol_id'] = int(intra_id)
+        raw_template_positions =  np.array([molecule_graph.nodes[aa_id]['pos'] for aa_id in sorted(aa_rigid_atoms_intra)])
+
+        # get the global atom IDs for the current rigid body from the all-atom molecular graph
+        global_aa_ids = sorted(list(aa_rigid_groups.get(body_id, [])))
+
+        # refine the intra_mol_id for each atom in the rigid body based on the global atom IDs
+        # the intra_mol_id may be changed compared to the original one in the template file, because the
+        # rigid body may react with other molecules and some atoms (e. g. H, H2O) may be removed, so we need to reassign the intra_mol_id based on the global atom IDs
+        for index, aa_id in enumerate(global_aa_ids):
+            if molecule_graph.nodes[aa_id].get('intra_mol_id') is None:
+                molecule_graph.nodes[aa_id]['intra_mol_id'] = index
+
+        aligned_aa_pos_list = []
+        for aa_id in global_aa_ids:
+            intra_atom_id = molecule_graph.nodes[aa_id]['intra_mol_id']
+            aligned_aa_pos_list.append(raw_template_positions[intra_atom_id])
+
+        aa_rigid_pos = np.array(aligned_aa_pos_list)
+
+        # use get_best_alignment to compute the optimal rotation via PCA-based alignment
+        # if there are paired atoms between CG and AA, use them to compute the optimal rotation via Kabsch algorithm
+        pairs = cg_graph.graph.get('rigid_pairs', {}).get(body_id)
+        if pairs is not None:
+            paired_A = pairs['paired_CG']
+            paired_B = pairs['paired_AA']
+        else:
+            paired_A, paired_B = None, None
+        best_R, target_com = get_best_alignment(cg_rigid_pos, aa_rigid_pos, box, paired_A=paired_A, paired_B=paired_B)
+        rigid_transforms[body_id] = (best_R, target_com)
+
+        # rotate and translate the rigid body atoms to the target CG positions
+        transformed_aa_pos = rotate_confs(aa_rigid_pos, best_R, box, target_com)
+        for idx, aa_id in enumerate(global_aa_ids):
+            all_local_coords[aa_id] = transformed_aa_pos[idx]
+
+    # -----------------------------------------------------------------
+    # Pseudo Graphs Construction
+    # -----------------------------------------------------------------
+    flex_cg_nodes = [n for n in cg_graph.nodes if cg_graph.nodes[n]['body'] == -1]
+    rigid_boundary_cg_nodes = set()
+
+    # Search for all rigid boundary CG beads that are bonded to flexible chains
+    for u, v in cg_graph.edges:
+        body_u = cg_graph.nodes[u]['body']
+        body_v = cg_graph.nodes[v]['body']
+        if body_u == -1 and body_v >= 0:
+            rigid_boundary_cg_nodes.add(v)
+        if body_v == -1 and body_u >= 0:
+            rigid_boundary_cg_nodes.add(u)
+
+    pseudo_cg_nodes = sorted(list(set(flex_cg_nodes).union(rigid_boundary_cg_nodes)))
+
+    # 2a. Construct a new coarse-grained pseudo graph `pseudo_cg_graph` that includes only flexible
+    # residues and the rigid boundary residues that connect to them.
+    pseudo_cg_graph = nx.Graph()
+    pseudo_cg_graph.graph['is_rigid'] = False
+    pseudo_cg_graph.graph['rigidity'] = 'FLEXIBLE'
+    pseudo_cg_graph.graph['box'] = box
+
+    old_cg2pseudo_res = {}
+    for pseudo_res_id, old_node in enumerate(pseudo_cg_nodes):
+        old_cg2pseudo_res[old_node] = pseudo_res_id
+        attrs = cg_graph.nodes[old_node].copy()
+        attrs['local_res_id'] = pseudo_res_id
+        pseudo_cg_graph.add_node(old_node, **attrs)
+
+    for u, v in cg_graph.edges:
+        if u in pseudo_cg_graph.nodes and v in pseudo_cg_graph.nodes:
+            pseudo_cg_graph.add_edge(u, v, **cg_graph.edges[u, v])
+
+    # 2b. Construct a new all-atom pseudo graph `pseudo_molecule_graph` that includes only flexible
+    # atoms and the rigid boundary atoms that connect to them.
+    pseudo_molecule_graph = nx.Graph()
+    old_aa2pseudo_aa = {}
+    pseudo_aa_idx = 0
+
+    for old_node in pseudo_cg_nodes:
+        orig_local_res_id = cg_graph.nodes[old_node]['local_res_id']
+        atom_ids = local2atoms[orig_local_res_id]
+        body_id = cg_graph.nodes[old_node]['body']
+        p_res_id = old_cg2pseudo_res[old_node]
+
+        if body_id >= 0:
+            junction_atoms = [aa_id for aa_id in atom_ids if any(
+                molecule_graph.nodes[nbr].get('body', -1) == -1 for nbr in molecule_graph.neighbors(aa_id))]
+            target_atoms = junction_atoms if junction_atoms else [atom_ids[0]]
+        else:
+            target_atoms = atom_ids
+
+        for aa_id in target_atoms:
+            old_aa2pseudo_aa[aa_id] = pseudo_aa_idx
+            attrs = molecule_graph.nodes[aa_id].copy()
+            attrs['res_id'] = p_res_id
+            pseudo_molecule_graph.add_node(pseudo_aa_idx, **attrs)
+            pseudo_aa_idx += 1
+
+    for u, v in molecule_graph.edges:
+        if u in old_aa2pseudo_aa and v in old_aa2pseudo_aa:
+            pseudo_molecule_graph.add_edge(old_aa2pseudo_aa[u], old_aa2pseudo_aa[v], **molecule_graph.edges[u, v])
+
+    # 2c. Re-invoke standard analyze_topology to generate a new local2atoms mapping for the pseudo graph system
+    _, pseudo_local2atoms = analyze_topology(pseudo_molecule_graph, pseudo_cg_graph)
+    pseudo_molecule = nxgraphs_to_mols([pseudo_molecule_graph])[0]
+    total_pseudo_atoms = pseudo_molecule.GetNumAtoms()
+
+    if total_pseudo_atoms <= large:
+        logger.info(f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) <= threshold. Invoking embed_by_etkdg.")
+        pseudo_conf = embed_by_etkdg(pseudo_molecule, pseudo_cg_graph, pseudo_molecule_graph, pseudo_local2atoms, box,
+                                     chunks_per_d)
+    else:
+        logger.info(f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) > threshold. Invoking embed_by_fragment.")
+        pseudo_conf = embed_by_fragment(pseudo_molecule, pseudo_molecule_graph, pseudo_cg_graph, pseudo_local2atoms,
+                                        box, chunks_per_d)
+
+    # -----------------------------------------------------------------
+    #  Assembly
+    # -----------------------------------------------------------------
+    for old_aa_id, p_aa_id in old_aa2pseudo_aa.items():
+        if molecule_graph.nodes[old_aa_id]['body_id'] == -1:
+            pos = pseudo_conf.GetAtomPosition(p_aa_id)
+            all_local_coords[old_aa_id] = np.array([pos.x, pos.y, pos.z])
+
+    final_full_conformer = Chem.Conformer()
+    for g_id, coord in all_local_coords.items():
+        final_full_conformer.SetAtomPosition(g_id, pbc(coord, box))
+
+    return final_full_conformer
 
 def embed_by_fragment(
         molecule: Chem.Mol,
@@ -242,9 +409,6 @@ def embed_by_etkdg(
     )
 
 
-from typing import Tuple
-from misc.logger import logger
-
 
 def embed_molecule(
         molecule: Chem.Mol,
@@ -256,61 +420,53 @@ def embed_molecule(
 ) -> Tuple[Chem.Mol, nx.Graph]:
     """
     The Ultimate Top-Level Orchestrator. Standardizes topology maps, routes the system
-    to specialized solvers to fetch a Conformer, updates all properties, and returns both objects.
-
-    Args:
-        molecule (Chem.Mol): All-atom RDKit molecule topology.
-        cg_molecule (nx.Graph): Coarse-grained configuration template layout.
-        molecule_graph (nx.Graph): Global all-atom molecular network metadata.
-        box (np.ndarray, optional): Simulation box dimensions. Fallback provided if None.
-        large (int, default 500): Atom count threshold defining the macro-system boundary.
-        chunk_per_d (int, default 1): Spatial grid subdivisions for optimization.
-
-    Returns:
-        Tuple[Chem.Mol, nx.Graph]:
-            - molecule: Standardized RDKit molecule containing the successfully bound 3D Conformer.
-            - molecule_graph: The molecular graph injected with 3D coordinate tensors under node attribute 'x'.
+    to specialized solvers based on explicit rigidity modes ('FLEXIBLE', 'RIGID', 'HYBRID'),
+    updates all properties, and returns both objects.
     """
-    # Step 1: Execute Workshop A (Topology Analyzer) to standardize unified res_id signatures
     global2local, local2atoms = analyze_topology(molecule_graph, cg_molecule)
 
-    # Infinite fallback boundary handling if box parameters are omitted
     if box is None:
-        box = np.ones(3) * 10000.0
-        logger.warning(f"Simulation box bounds missing. Temporarily fallback to: {box}")
+        cg_coords = np.array([d['x'] for n, d in cg_molecule.nodes(data=True) if 'x' in d])
+        min_coords = cg_coords.min(axis=0)
+        max_coords = cg_coords.max(axis=0)
+        span = max_coords - min_coords
+        box = span + 100.0
 
-    # Step 2: Conformer Extraction Pass via clean 3-way branching logic
-    # --- MODE 1: Rigid-Body Architecture System ---
-    if cg_molecule.graph.get('is_rigid', False):
-        logger.info("Routing system straight into the Rigid Aligner Workshop.")
-        conf = embed_rigid(molecule, cg_molecule, local2atoms, box)
+        logger.warning(
+            f"Simulation box bounds missing. Dynamically guessed bounding box from CG coordinates: "
+            f"[{box[0]:.2f}, {box[1]:.2f}, {box[2]:.2f}] Å (with 50Å padding)."
+        )
 
-    # --- MODE 2: Small Non-Rigid System (Standard ETKDG Route) ---
-    elif molecule.GetNumAtoms() <= large:
-        logger.info(f"System size ({molecule.GetNumAtoms()} atoms) <= threshold ({large}). Routing to embed_by_etkdg.")
-        conf = embed_by_etkdg(molecule, cg_molecule, molecule_graph, local2atoms, box, chunk_per_d)
+    rigidity_mode = cg_molecule.graph.get('rigidity', 'FLEXIBLE')
 
-    # --- MODE 3: Massive Macromolecular System (Fragment Solver Route) ---
+    if rigidity_mode == 'RIGID':
+        logger.info("Embedding pure rigid system...")
+        conf = embed_rigid(molecule, cg_molecule, box)
+
+    elif rigidity_mode == 'HYBRID':
+        logger.info("Embedding hybrid/grafting system with mixed rigid and flexible components...")
+        conf = embed_hybrid(molecule, molecule_graph, cg_molecule, local2atoms, box, large, chunk_per_d)
+
+    elif rigidity_mode == 'FLEXIBLE':
+        logger.info("Embedding flexible system...")
+        if molecule.GetNumAtoms() <= large:
+            logger.info(f"System size ({molecule.GetNumAtoms()} atoms) <= threshold ({large}). Routing to embed_by_etkdg.")
+            conf = embed_by_etkdg(molecule, cg_molecule, molecule_graph, local2atoms, box, chunk_per_d)
+        else:
+            logger.info(f"System size ({molecule.GetNumAtoms()} atoms) > threshold ({large}). Routing to embed_by_fragment.")
+            conf = embed_by_fragment(molecule, molecule_graph, cg_molecule, local2atoms, box, chunk_per_d)
     else:
-        logger.info(
-            f"System size ({molecule.GetNumAtoms()} atoms) > threshold ({large}). Routing to embed_by_fragment.")
-        conf = embed_by_fragment(molecule, molecule_graph, cg_molecule, local2atoms, box, chunk_per_d)
+        raise ValueError(f"Unknown rigidity mode tag encountered in global config: '{rigidity_mode}', expected one of ['FLEXIBLE', 'RIGID', 'HYBRID'].")
 
-    # Step 3: Global State Injection
     if conf is not None:
-        # Clear any residual un-optimized conformation layouts
         if molecule.GetNumConformers() > 0:
             molecule.RemoveAllConformers()
 
-        # Commit the generated 3D conformer directly into the RDKit molecule
         molecule.AddConformer(conf, assignId=True)
 
-        # Extract atomic 3D coordinates and inject them as 'x' attributes into the molecular graph
         for atom in molecule.GetAtoms():
             a_id = atom.GetIdx()
             pos = conf.GetAtomPosition(a_id)
-
-            # Bound natively as a high-performance 3D NumPy coordinate tensor
             molecule_graph.nodes[a_id]['x'] = np.array([pos.x, pos.y, pos.z])
 
         logger.info("Successfully bound Conformer properties and mapped 'x' tensor coordinates into the graph.")

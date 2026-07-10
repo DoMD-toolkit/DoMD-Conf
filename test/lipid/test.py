@@ -1,4 +1,4 @@
-from misc.pipeline import build_aa_topology
+from misc.pipeline import run_sdf_mode
 from misc.logger import logger
 logger.setLevel('INFO')
 logger.propagate = True
@@ -113,5 +113,5 @@ mols = {
 
 xmlfile = 'cg.xml'
 
-rdmols = build_aa_topology(mols, reaction_template, xmlfile, reactions=None, large=20)
+rdmols = run_sdf_mode(mols, reaction_template, xmlfile, reactions=None, large=20)
 write_mols_to_sdf(rdmols, 'lipid.sdf')

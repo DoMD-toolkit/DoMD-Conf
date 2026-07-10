@@ -21,95 +21,137 @@ def pbc(x, l):
     """
     return x - l * np.rint(x / l)
 
-
-def get_best_alignment(coords_A, coords_B, box):
-    r"""Aligns molecule B to molecule A by minimizing RMSD under PBC.
-
-    This function performs a rigid body alignment (rotation and translation) using
-    Principal Component Analysis (PCA) on the gyration tensors. It resolves the
-    eigenvector sign ambiguity by exhaustively checking all axis permutations.
-
-    The algorithm proceeds as follows:
-
-    1.  **Centering**: Compute the Center of Mass (COM) for both molecules using
-        circular mean to handle Periodic Boundary Conditions (PBC).
-        .. math::
-            X_{centered} = X - \text{COM}(X)
-    2.  **Gyration Tensor**: Compute the covariance matrix (Gyration Tensor) roughly
-        representing the moment of inertia.
-
-        .. math::
-            R_g = \frac{1}{N} X_{centered}^T X_{centered}
-
-    3.  **Eigendecomposition**: Obtain the principal axes (eigenvectors $V$) by decomposing $R_g$.
-
-        .. math::
-            R_g = V \Lambda V^T
-
-    4.  **Optimal Rotation Search**: Construct candidate rotation matrices $R$ by mapping
-        the principal axes of B ($V_B$) to A ($V_A$), iterating through all possible
-        sign flips $S$ (diagonal matrix with $\pm 1$).
-
-        .. math::
-            R = V_A \cdot S \cdot V_B^T
-
-        The algorithm selects the $R$ that minimizes the Root Mean Square Deviation (RMSD)
-        and ensures a proper rotation ($\det(R) = 1$).
+def __get_best_alignment(coords_A, coords_B, box):
+    """Aligns point cloud B (mobile, e.g., AA) to reference point cloud A (target, e.g., CG)
+    without requiring point-to-point correspondence. Resolves axis sign ambiguity
+    using third-order moments (skewness).
 
     Args:
-        coords_A (np.ndarray): Coordinates of the reference molecule A, shape (N, 3).
-        coords_B (np.ndarray): Coordinates of the mobile molecule B, shape (N, 3).
-        box (np.ndarray): Simulation box dimensions [Lx, Ly, Lz] for PBC handling.
-
-    Returns:
-        tuple: A tuple containing:
-            - best_rotated_B (np.ndarray): The aligned coordinates of B.
-            - best_R (np.ndarray): The optimal 3x3 rotation matrix.
-            - best_rmsd (float): The minimum RMSD achieved.
-            - comA (np.ndarray): The center of mass of A (used for final translation).
+        coords_A (np.ndarray): Target reference coordinates, shape (D, 3).
+        coords_B (np.ndarray): Mobile initial coordinates, shape (N, 3).
+        box (np.ndarray): Simulation box dimensions.
     """
-    nA, D = coords_A.shape
-    comA = np.array(
-        [circmean(coords_A[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D)]).ravel()
-    comB = np.array(
-        [circmean(coords_B[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D)]).ravel()
-    cA = pbc(coords_A - comA, box)  # coords_A- np.mean(coords_A, axis=0)
-    cB = pbc(coords_B - comB, box)  # coords_B - np.mean(coords_B, axis=0)
+    D_dim = coords_A.shape[1]
 
+    # 1. Centering via circular mean under PBC
+    comA = np.array(
+        [circmean(coords_A[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+    comB = np.array(
+        [circmean(coords_B[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+
+    cA = pbc(coords_A - comA, box)
+    cB = pbc(coords_B - comB, box)
+
+    # 2. Compute 3x3 Gyration Tensors independently
     RgA = np.dot(cA.T, cA) / len(cA)
     RgB = np.dot(cB.T, cB) / len(cB)
 
     def get_sorted_eigenvectors(rg_tensor):
         vals, vecs = np.linalg.eigh(rg_tensor)
-        idx = np.argsort(vals)[::-1]
+        idx = np.argsort(vals)[::-1]  # Sort descending (largest inertia axis first)
         return vecs[:, idx]
 
     VA = get_sorted_eigenvectors(RgA)
     VB = get_sorted_eigenvectors(RgB)
 
-    best_rmsd = float('inf')
-    best_rotated_B = None
-    best_R = None
+    # 3. Project point clouds onto their respective principal axes
+    proj_A = cA @ VA  # Shape (D, 3)
+    proj_B = cB @ VB  # Shape (N, 3)
 
-    import itertools
-    for signs in itertools.product([1, -1], repeat=3):
-        sign_mat = np.diag(signs)
+    # Compute third moments (skewness signs) along each principal axis
+    skew_A = np.mean(proj_A ** 3, axis=0)
+    skew_B = np.mean(proj_B ** 3, axis=0)
 
-        R_candidate = VA @ sign_mat @ VB.T
+    # 4. Resolve sign ambiguities by aligning skewness directions
+    signs = np.ones(3)
+    for i in range(3):
+        if abs(skew_A[i]) > 1e-4 and abs(skew_B[i]) > 1e-4:
+            signs[i] = np.sign(skew_A[i]) * np.sign(skew_B[i])
 
-        if np.isclose(np.linalg.det(R_candidate), 1.0):
-            rotated_B = np.dot(cB, R_candidate.T)
+    # 5. Guard Clause: Enforce a proper rotation matrix (det == 1, no reflections)
+    R = VA @ np.diag(signs) @ VB.T
+    if np.linalg.det(R) < 0:
+        # If it's a reflection, flip the least significant axis (the thinnest direction)
+        signs[2] = -signs[2]
+        R = VA @ np.diag(signs) @ VB.T
 
-            diff = cA - rotated_B
-            rmsd = np.sqrt(np.mean(diff ** 2))
+    return R, comA
 
-            if rmsd < best_rmsd:
-                best_rmsd = rmsd
-                best_rotated_B = rotated_B
-                best_R = R_candidate
 
-    return best_rotated_B, best_R, best_rmsd, comA
+import numpy as np
 
+
+def get_best_alignment(coords_A, coords_B, box, paired_A=None, paired_B=None):
+    """
+    Advanced Dual-Mode Alignment Engine for ChemFAST.
+
+    Mode 1 (Supervised/Kabsch): If paired markers >= 4, solve exact point-to-point via SVD.
+    Mode 2 (Unsupervised/PCA): Fallback to Gyration Tensor PCA + Skewness when markers < 4.
+    """
+    D_dim = coords_A.shape[1]
+
+
+    # -----------------------------------------------------------------
+    # 🔥 Kabsch Algorithm for Exact Point-to-Point Alignment (Supervised Mode)
+    # -----------------------------------------------------------------
+    if paired_A is not None and paired_B is not None and len(paired_A) >= 4:
+        comA = np.array(
+            [circmean(paired_A[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+        comB = np.array(
+            [circmean(paired_B[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+        cpA = pbc(paired_A - comA, box)
+        cpB = pbc(paired_B - comB, box)
+
+        H = np.dot(cpB.T, cpA)
+
+        U, S, Vt = np.linalg.svd(H)
+
+        R = np.dot(Vt.T, U.T)
+        if np.linalg.det(R) < 0:
+            Vt[2, :] *= -1
+            R = np.dot(Vt.T, U.T)
+
+        return R, comA
+
+    # -----------------------------------------------------------------
+    #  Principle Component Analysis (PCA) + Skewness Fallback Alignment
+    # -----------------------------------------------------------------
+    else:
+        comA = np.array(
+            [circmean(coords_A[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+        comB = np.array(
+            [circmean(coords_B[:, i:i + 1], low=-box[i] / 2., high=box[i] / 2., axis=0) for i in range(D_dim)]).ravel()
+
+        cA = pbc(coords_A - comA, box)
+        cB = pbc(coords_B - comB, box)
+        RgA = np.dot(cA.T, cA) / len(cA)
+        RgB = np.dot(cB.T, cB) / len(cB)
+
+        def get_sorted_eigenvectors(rg_tensor):
+            vals, vecs = np.linalg.eigh(rg_tensor)
+            idx = np.argsort(vals)[::-1]
+            return vecs[:, idx]
+
+        VA = get_sorted_eigenvectors(RgA)
+        VB = get_sorted_eigenvectors(RgB)
+
+        proj_A = cA @ VA
+        proj_B = cB @ VB
+
+        skew_A = np.mean(proj_A ** 3, axis=0)
+        skew_B = np.mean(proj_B ** 3, axis=0)
+
+        signs = np.ones(3)
+        for i in range(3):
+            if abs(skew_A[i]) > 1e-4 and abs(skew_B[i]) > 1e-4:
+                signs[i] = np.sign(skew_A[i]) * np.sign(skew_B[i])
+
+        R = VA @ np.diag(signs) @ VB.T
+        if np.linalg.det(R) < 0:
+            signs[2] = -signs[2]
+            R = VA @ np.diag(signs) @ VB.T
+
+        return R, comA
 
 def rotate_confs(pos, R, box, com_TP):
     """Applies a rotation and translation to a set of coordinates under PBC.
@@ -147,51 +189,52 @@ def analyze_topology(molecule_graph: nx.Graph, cg_graph: nx.Graph) -> Tuple[Dict
             - global2local: Maps global_res_id -> local_res_id
             - local2atoms: Maps local_res_id -> List of atom indices within this residue
     """
-    # Step 1: Strict Validation - global_res_id is a mandatory prerequisite
-    for atom_id, data in molecule_graph.nodes(data=True):
-        if 'global_res_id' not in data:
-            raise KeyError(
-                f"Mandatory attribute 'global_res_id' missing at atom node {atom_id}. "
-                f"The topology analyzer cannot map atoms to their coarse-grained counterparts."
-            )
+    if cg_graph.graph['rigidity'] == 'RIGID':
+        # Step 1: Strict Validation - global_res_id is a mandatory prerequisite
+        for atom_id, data in molecule_graph.nodes(data=True):
+            if 'global_res_id' not in data:
+                raise KeyError(
+                    f"Mandatory attribute 'global_res_id' missing at atom node {atom_id}. "
+                    f"The topology analyzer cannot map atoms to their coarse-grained counterparts."
+                )
+        # Step 2: Direct Mapping - For rigid molecules, all atoms belong to a single residue
+        global2local = {next(iter(cg_graph.nodes)): 0}
+        local2atoms = {0: list(molecule_graph.nodes)}
+        # Inject the unified res_id back into the molecule_graph
+        for atom_id in molecule_graph.nodes:
+            molecule_graph.nodes[atom_id]['res_id'] = 0
+    else:
+        # Step 1: Strict Validation - global_res_id is a mandatory prerequisite
+        for atom_id, data in molecule_graph.nodes(data=True):
+            if 'global_res_id' not in data:
+                raise KeyError(
+                    f"Mandatory attribute 'global_res_id' missing at atom node {atom_id}. "
+                    f"The topology analyzer cannot map atoms to their coarse-grained counterparts."
+                )
 
-    global2local: Dict[Any, int] = {}
-    # Step 2: Extract existing mapping metadata from both graphs if available
-    # Check if cg_graph has predefined 'local_res_id'
-    #for cg_node, data in cg_graph.nodes(data=True):
-    #    if 'local_res_id' in data:
-    #        global2local[cg_node] = data['local_res_id']
-
-    ## Cross-reference with molecule_graph's 'res_id' to complement or verify mapping
-    #for atom_id, data in molecule_graph.nodes(data=True):
-    #    g_id = data['global_res_id']
-    #    if 'res_id' in data:
-    #        r_id = data['res_id']
-    #        # Integrity check: Ensure no conflicting mappings exist between the two graphs
-    #        if g_id in global2local and global2local[g_id] != r_id:
-    #            molecule_graph.nodes[atom_id]['res_id'] = global2local[g_id]
-
-    # Step 3: Fallback Logic - If no local tracking IDs were provided, build from scratch
-    if not global2local or len(global2local) < len(cg_graph):
+        global2local: Dict[Any, int] = {}
+        # Step 3: Fallback Logic - If no local tracking IDs were provided, build from scratch
         logger.debug("No local_res_id detected. Generating 0-indexed local sequences from cg_graph.")
         for idx, cg_node in enumerate(cg_graph.nodes):
             global2local[cg_node] = idx
 
-    # Step 4: Back-propagate finalized information and compile outputs
-    # Synchronize cg_graph attributes
-    for cg_node in cg_graph.nodes:
-        cg_graph.nodes[cg_node]['local_res_id'] = global2local[cg_node]
+        # Step 4: Back-propagate finalized information and compile outputs
+        # Synchronize cg_graph attributes
+        for cg_node in cg_graph.nodes:
+            cg_graph.nodes[cg_node]['local_res_id'] = global2local[cg_node]
 
-    # Initialize the atom accumulator dictionary
-    local2atoms: Dict[int, List[int]] = {local_id: [] for local_id in global2local.values()}
-    # Update molecule_graph and harvest atom lists
-    for atom_id, data in molecule_graph.nodes(data=True):
-        g_id = data['global_res_id']
-        local_id = global2local[g_id]
-        # Inject the standardized token back into the all-atom graph reference
-        data['res_id'] = local_id
-        local2atoms[local_id].append(atom_id)
-    logger.info(f"Topology analysis complete. Successfully mapped {len(global2local)} residues.")
+        # Initialize the atom accumulator dictionary
+        local2atoms: Dict[int, List[int]] = {local_id: [] for local_id in global2local.values()}
+        # Update molecule_graph and harvest atom lists
+        for atom_id, data in molecule_graph.nodes(data=True):
+            g_id = data['global_res_id']
+            if g_id < 0:
+                continue
+            local_id = global2local[g_id]
+            # Inject the standardized token back into the all-atom graph reference
+            data['res_id'] = local_id
+            local2atoms[local_id].append(atom_id)
+        logger.info(f"Topology analysis complete. Successfully mapped {len(global2local)} residues.")
     return global2local, local2atoms
 
 
