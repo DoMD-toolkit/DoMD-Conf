@@ -1,0 +1,10 @@
+# Ignore IDE configuration folders
+.idea/
+
+# Ignore Python bytecode directories
+**/__pycache__/
+*.py[cod]
+workspaces/
+
+# f**k apple
+.DS_Store
