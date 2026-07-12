@@ -108,5 +108,5 @@ def topology_builder(reactants_config, reaction_template, rigid_configs=None, cg
         if reactions is None:
             reactions = reactions_search(cg_graph)
         reactor = Reactor(reactants_config, reaction_template)
-        aa_mol_h, aa_graph = reactor.process(cg_graph, reactions, rigid_configs, mol_idx=mol_idx)
+        aa_mol_h, aa_graph = reactor.process(cg_graph, reactions, mol_idx=mol_idx)
     return aa_mol_h, aa_graph

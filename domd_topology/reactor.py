@@ -184,7 +184,7 @@ class Reactor(object):
                 reaction_name, _info['cg_reactant_list'], _info['smarts'], _info.get("prod_idx")
             )
 
-    def process(self, cg_mol:nx.Graph, reactions:list, rigid_configs:dict=None, mol_idx=0) -> tuple[Chem.Mol, nx.Graph]:
+    def process(self, cg_mol:nx.Graph, reactions:list, mol_idx=0) -> tuple[Chem.Mol, nx.Graph]:
         """Processes a single CG molecule to generate its All-Atom structure.
 
                 Args:
@@ -202,8 +202,7 @@ class Reactor(object):
                 Raises:
                     ValueError: If a reaction template or reactant definition is missing, or if a reaction fails.
         """
-        if rigid_configs is None:
-            rigid_configs = {}
+        rigid_configs = cg_mol.graph.get('rigid_configs', {})
         rigid_nodes = set()
         non_rigid_nodes = set()
         for n in cg_mol.nodes:

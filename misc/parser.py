@@ -320,187 +320,25 @@ def _extract_chem_complete_submol(orig_mol: Chem.Mol, seed_atom_indices: list) -
     sub_mol = rw_mol.GetMol()
     return sub_mol
 
+def parse_body_configs(body_configs: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
+    """Converts body_configs from string keys to integer body_id keys."""
+    parsed_configs = {}
+    for body_type, config in body_configs.items():
+        body_ids = config.get('body_idx', [])
+        file = config.get('file')
+        mapping = config.get('mapping', {})
+        for body_id in body_ids:
+            parsed_configs[body_id] = {
+                'file': file,
+                'mapping': mapping,
+                'type': body_type
+            }
 
-def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body_configs, use_extract_submol=False) -> \
-List[nx.Graph]:
-    """Segments the unified system graph into isolated molecule graphs and cleans metadata tags."""
-    cg_mols = []
-
-    # Extract independent components (shadow edges ensure rigid networks and grafts cluster perfectly)
-    for component in nx.connected_components(cg_sys):
-        # Create an isolated editable deep copy
-        subgraph = cg_sys.subgraph(component).copy()
-
-        # Unlink the temporary virtual edges to preserve immaculate chemical bond profiles
-        virtual_edges = [(u, v) for u, v, d in subgraph.edges(data=True) if d.get('is_virtual', False)]
-        subgraph.remove_edges_from(virtual_edges)
-
-        # Inject Graph-level tracking parameters
-        subgraph.graph['box'] = box_tensor
-        total_nodes_count = len(subgraph.nodes)
-        rigid_nodes_count = 0
-        primary_type = None
-
-        # Standardize local sequence indexes and inspect particle constraint states
-        flexible_nodes = []
-        rigid_groups = {}  # {body_id: [global_node_tags]}
-
-        for node_idx in subgraph.nodes:
-            body_id = subgraph.nodes[node_idx]['body']
-            if body_id == -1:
-                flexible_nodes.append(node_idx)
-            else:
-                if body_id not in rigid_groups:
-                    rigid_groups[body_id] = []
-                rigid_groups[body_id].append(node_idx)
-        flexible_nodes.sort()
-        for local_idx, node_idx in enumerate(flexible_nodes):
-            subgraph.nodes[node_idx]['intra_mol_id'] = local_idx
-        for body_id, nodes_list in rigid_groups.items():
-            nodes_list.sort()
-            for local_idx, node_idx in enumerate(nodes_list):
-                subgraph.nodes[node_idx]['intra_mol_id'] = local_idx
-
-        # -------------------------------------------------------------------------
-        # Initialize graph-level registries for supervised alignment constraints
-        subgraph.graph['paired_A'] = {}
-        subgraph.graph['paired_B'] = {}
-
-        for body_id in rigid_groups:
-            file_path = body_configs[body_id].get('file')
-            sites_config = body_configs[body_id].get('mapping', {})
-            for node in subgraph.nodes:
-                smarts = None
-                smiles = None
-                atom_index = None
-                bead_type = subgraph.nodes[node]['type']
-                local_cg_idx = subgraph.nodes[node]['intra_mol_id']
-                if local_cg_idx in sites_config:
-                    bead_type = sites_config[local_cg_idx].get('type', bead_type)
-                    atom_index = sites_config[local_cg_idx].get('atom_index')
-                    smiles = sites_config[local_cg_idx].get('smiles', smiles)
-                    smarts = sites_config[local_cg_idx].get('smarts', smarts)
-
-                    rigid_frag_mol = None
-                    if smarts:
-                        rigid_frag_mol = Chem.MolFromSmarts(smarts)
-                    elif smiles:
-                        rigid_frag_mol = Chem.MolFromSmiles(smiles)
-                    elif atom_index and len(atom_index) == 1:
-                        rigid_mol = molecule_reader(file_path)
-                        atom_idx = atom_index[0]
-                        atom = rigid_mol.GetAtomWithIdx(atom_idx)
-                        smarts = f'[{atom.GetSymbol()}]'
-                        rigid_frag_mol = Chem.MolFromSmarts(smarts)
-                    else:
-                        logger.error(
-                            f"No valid SMARTS or SMILES provided for reaction bead {local_cg_idx} in body_id {body_id}. Please check the mapping configuration.")
-
-                    if rigid_frag_mol is not None:
-                        if use_extract_submol:
-                            rigid_mol = molecule_reader(file_path)
-                            represent_rigid_frag_mol = _extract_chem_complete_submol(rigid_mol, atom_index)
-                            match = represent_rigid_frag_mol.GetSubstructMatch(rigid_frag_mol, useChirality=True)
-                            rigid_frag_mol = Chem.RenumberAtoms(rigid_frag_mol, match)
-                        rigid_frag_atom_mapping_ = {}
-                        all_num_maps = [atom.GetAtomMapNum() for atom in rigid_frag_mol.GetAtoms()]
-                        if len(all_num_maps) != len(set(all_num_maps)):
-                            explicit_num_map = False
-                        else:
-                            explicit_num_map = True
-
-                        for frag_atom_i in range(rigid_frag_mol.GetNumAtoms()):
-                            atom = rigid_frag_mol.GetAtomWithIdx(frag_atom_i)
-                            map_num = atom.GetAtomMapNum()
-                            if explicit_num_map:
-                                rigid_frag_atom_mapping_[map_num] = frag_atom_i
-                            else:
-                                rigid_frag_atom_mapping_[frag_atom_i] = frag_atom_i
-
-                        sorted_num_maps = sorted(rigid_frag_atom_mapping_.keys())
-                        frag_atom_mapping = {}
-                        for i, map_num in enumerate(sorted_num_maps):
-                            frag_atom_mapping[i] = rigid_frag_atom_mapping_[map_num]
-                        subgraph.nodes[node]['frag_atom_mapping'] = frag_atom_mapping
-                        subgraph.nodes[node]['smarts'] = smarts
-
-            # Extract and pre-compute paired point clouds for supervised Kabsch/SVD alignment mode
-            # Initialize the centralized rigid pairs container before processing the rigid groups
-            subgraph.graph['rigid_pairs'] = {}
-
-            for body_id in rigid_groups:
-                file_path = body_configs[body_id].get('file')
-                sites_config = body_configs[body_id].get('mapping', {})
-
-                # ... [Your existing node-loop processing frag_atom_mapping remains here] ...
-
-                paired_A_list = []
-                paired_B_list = []
-                if file_path and sites_config:
-                    try:
-                        # Read the full reference all-atom template once per rigid group
-                        rigid_mol = molecule_reader(file_path)
-                        aa_positions = rigid_mol.GetConformer().GetPositions()
-
-                        # Gather corresponding landmark coordinates belonging to the current body_id
-                        for r_node in rigid_groups[body_id]:
-                            r_local_idx = subgraph.nodes[r_node]['intra_mol_id']
-                            if r_local_idx in sites_config:
-                                target_atom_idx = sites_config[r_local_idx].get('atom_index', [])
-                                if target_atom_idx:
-                                    paired_A_list.append(subgraph.nodes[r_node]['x'])
-                                    paired_B_list.append(np.mean(aa_positions[target_atom_idx], axis=0))
-                    except Exception as e:
-                        logger.warning(f"Failed to pre-compute alignment landmarks for body_id {body_id}: {e}")
-
-                # Cache the paired matrices into the centralized rigid_pairs directory
-                if len(paired_A_list) >= 4:
-                    subgraph.graph['rigid_pairs'][body_id] = {
-                        'paired_CG': np.array(paired_A_list),
-                        'paired_AA': np.array(paired_B_list)
-                    }
-                else:
-                    subgraph.graph['rigid_pairs'][body_id] = None
-
-        # -------------------------------------------------------------------------
-
-        sorted_all_nodes = sorted(list(subgraph.nodes))
-        for intra_id, node_idx in enumerate(sorted_all_nodes):
-            subgraph.nodes[node_idx]['local_res_id'] = intra_id
-
-        total_nodes_count = len(sorted_all_nodes)
-        rigid_nodes_count = sum(len(tags) for tags in rigid_groups.values())
-
-        if rigid_nodes_count == 0:
-            # FLEXIBLE: purely flexible molecule (no nodes belong to any rigid body)
-            subgraph.graph['is_rigid'] = False
-            subgraph.graph['rigidity'] = 'FLEXIBLE'
-            subgraph.graph['body_id'] = [-1]
-            subgraph.graph['rigid_groups'] = {}
-        elif rigid_nodes_count == total_nodes_count:
-            # RIGID: purely rigid molecule (all nodes belong to a single rigid body)
-            subgraph.graph['is_rigid'] = True
-            subgraph.graph['rigidity'] = 'RIGID'
-            subgraph.graph['body_id'] = _final_all_rigid_id(subgraph)
-            subgraph.graph['rigid_groups'] = rigid_groups
-        else:
-            # HYBRID: rigid + flexible
-            subgraph.graph['is_rigid'] = True
-            subgraph.graph['rigidity'] = 'HYBRID'
-            subgraph.graph['body_id'] = _final_all_rigid_id(subgraph)
-            subgraph.graph['rigid_groups'] = rigid_groups
-
-        # 3. molecule type
-        if primary_type:
-            subgraph.graph['type'] = primary_type
-        cg_mols.append(subgraph)
-
-    return cg_mols
+    return parsed_configs
 
 def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body_configs, use_extract_submol=False) -> List[nx.Graph]:
     """Segments the unified system graph into isolated molecule graphs and cleans metadata tags."""
     cg_mols = []
-
     # Extract independent components (shadow edges ensure rigid networks and grafts cluster perfectly)
     for component in nx.connected_components(cg_sys):
         # Create an isolated editable deep copy
@@ -537,7 +375,10 @@ def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body
                 subgraph.nodes[node_idx]['intra_mol_id'] = local_idx
 
         # -------------------------------------------------------------------------
+        subgraph_rigid_configs = {body_id: body_configs[body_id] for body_id in rigid_groups if body_id in body_configs}
+        subgraph.graph['rigid_configs'] = subgraph_rigid_configs
         for body_id in rigid_groups:
+
             file_path = body_configs[body_id].get('file')
             sites_config = body_configs[body_id].get('mapping', {})
             for node in subgraph.nodes:
@@ -675,7 +516,7 @@ def parse_cg_topology(
             - box_tensor: Scaled 3D bounding length matrix [Lx, Ly, Lz] in Angstrom units.
     """
     ext = os.path.splitext(cg_configuration_file)[-1].lower()
-
+    rigid_configs = parse_body_configs(rigid_configs) if rigid_configs else {}
     # 1. Branch to localized raw file readers (Module 1)
     if ext == '.xml':
         raw_data, box_tensor = _extract_raw_data_from_xml(cg_configuration_file)
