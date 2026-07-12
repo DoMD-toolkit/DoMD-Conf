@@ -1,11 +1,12 @@
 import re
 from io import StringIO
 from xml.etree import cElementTree
+
 import networkx as nx
 import numpy as np
 
 
-def pbc(x,l):
+def pbc(x, l):
     """Applies periodic boundary conditions to a coordinate.
 
     Args:
@@ -15,7 +16,8 @@ def pbc(x,l):
     Returns:
         float or np.ndarray: The coordinate wrapped within [-l/2, l/2].
     """
-    return x - l*np.rint(x/l)
+    return x - l * np.rint(x / l)
+
 
 def control_in(control_file):
     """Parses a control input file.
@@ -34,6 +36,7 @@ class Box(object):
         xz (float): Tilt factor xz.
         yz (float): Tilt factor yz.
     """
+
     def __init__(self):
         """Initializes a Box object with zero tilt factors."""
         self.xy = 0
@@ -61,6 +64,7 @@ class XmlParser(object):
         box (Box): The simulation box object.
         data (dict): A dictionary storing parsed data arrays and structures (e.g., 'reaction', 'template').
     """
+
     def __init__(self, filename, needed=None):
         """Initializes the XmlParser.
 
@@ -111,6 +115,7 @@ class XmlParser(object):
             if len(element.text.strip()) > 0:
                 self.data[element.tag] = np.genfromtxt(StringIO(element.text), dtype=None, encoding=None)
 
+
 template_cg = '''<?xml version ="1.0" encoding ="UTF-8" ?>
 <{program}_xml version="{version}">
 <configuration time_step="0" dimensions="3" natoms="{n_atoms:d}" >
@@ -146,6 +151,7 @@ template_cg = '''<?xml version ="1.0" encoding ="UTF-8" ?>
 </configuration>
 </{program}_xml>'''
 
+
 def XmlWriter(CG_systems, box, filename='chemfast', program='galamost', version='1.3'):
     """Writes a Coarse-Grained (CG) system configuration to an XML file.
 
@@ -163,14 +169,14 @@ def XmlWriter(CG_systems, box, filename='chemfast', program='galamost', version=
     CG_system_graph = nx.compose_all(CG_systems)
     n_atoms = len(CG_system_graph.nodes)
     n_bonds = len(CG_system_graph.edges)
-    n_angles = 0#len(CG_system_graph._hyperedges[3]) if CG_system_graph._hyperedges.get(3) else 0
-    n_dihedrals = 0# len(CG_system_graph._hyperedges[4]) if CG_system_graph._hyperedges.get(4) else 0
+    n_angles = 0  # len(CG_system_graph._hyperedges[3]) if CG_system_graph._hyperedges.get(3) else 0
+    n_dihedrals = 0  # len(CG_system_graph._hyperedges[4]) if CG_system_graph._hyperedges.get(4) else 0
     mass = types = opls_type = positions = charge = monomer_id = body = image = ''
-    bond = angle = dihedral = improper  = ''
+    bond = angle = dihedral = improper = ''
     for system in CG_systems:
         for atom_graph in system.nodes:
             mass += '1.0\n'
-            charge += f'{system.nodes[atom_graph].get("charge",0)}\n'
+            charge += f'{system.nodes[atom_graph].get("charge", 0)}\n'
             monomer_id += f'{atom_graph}\n'
             types += '%s\n' % system.nodes[atom_graph]['type']
             pos = pbc(system.nodes[atom_graph]['x'], box)
@@ -200,7 +206,8 @@ def XmlWriter(CG_systems, box, filename='chemfast', program='galamost', version=
     o = open('out_%s.xml' % filename, 'w')
     o.write(
         template_cg.format(
-            n_atoms=n_atoms, n_bonds=n_bonds, mass=mass, types=types, images=image, bodys=body,opls_type=opls_type, positions=positions,
+            n_atoms=n_atoms, n_bonds=n_bonds, mass=mass, types=types, images=image, bodys=body, opls_type=opls_type,
+            positions=positions,
             bond=bond, charge=charge, angle=angle, dihedral=dihedral, n_angles=n_angles, n_dihedrals=n_dihedrals,
             monomer_id=monomer_id, program=program, version=version, lx=lx, ly=ly, lz=lz, xy=xy, xz=xz, yz=yz,
             n_impropers=0, improper=improper

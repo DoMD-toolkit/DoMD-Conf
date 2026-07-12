@@ -1,18 +1,20 @@
+from typing import Dict, List, Tuple
+
 import networkx as nx
 import numpy as np
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from typing import Dict, List, Tuple
-from domd_xyz.embed.optimize_orientation import Meta, optimize_res_orientation
-from misc.logger import logger
-from misc.parser import molecule_reader, nxgraphs_to_mols
-from domd_xyz.embed.embed_with_cg_xyz import (
+
+from domd_xyz.embed_with_cg_xyz import (
     generate_local_fragment_coords,
     analyze_topology,
     get_best_alignment,
     rotate_confs,
     pbc
 )
+from domd_xyz.optimize_orientation import Meta, optimize_res_orientation
+from misc.logger import logger
+from misc.parser import nxgraphs_to_mols
 
 
 def assemble_and_stitch_system(
@@ -84,6 +86,7 @@ def assemble_and_stitch_system(
 
     return final_conformer
 
+
 def embed_rigid(molecule: Chem.Mol,
                 cg_molecule: nx.Graph,
                 box: np.ndarray) -> Chem.Mol:
@@ -130,9 +133,10 @@ def embed_rigid(molecule: Chem.Mol,
     r_aa_pos = pbc(transformed_aa_pos, box)
     for i, p in enumerate(r_aa_pos):
         conf.SetAtomPosition(i, p)
-    #if molecule.GetNumConformers() == 0 and conf is not None:
+    # if molecule.GetNumConformers() == 0 and conf is not None:
     #    molecule.AddConformer(conf, assignId=True)
     return conf
+
 
 def embed_hybrid(
         molecule: Chem.Mol,
@@ -182,14 +186,16 @@ def embed_hybrid(
         aa_rigid_atoms_intra = np.arange(len(aa_rigid_atoms_global))
         for global_id, intra_id in zip(aa_rigid_atoms_global, aa_rigid_atoms_intra):
             molecule_graph.nodes[global_id]['intra_mol_id'] = int(intra_id)
-        raw_template_positions =  np.array([molecule_graph.nodes[aa_id]['pos'] for aa_id in sorted(aa_rigid_atoms_intra)])
+        raw_template_positions = np.array(
+            [molecule_graph.nodes[aa_id]['pos'] for aa_id in sorted(aa_rigid_atoms_intra)])
 
         # get the global atom IDs for the current rigid body from the all-atom molecular graph
         global_aa_ids = sorted(list(aa_rigid_groups.get(body_id, [])))
 
         # refine the intra_mol_id for each atom in the rigid body based on the global atom IDs
         # the intra_mol_id may be changed compared to the original one in the template file, because the
-        # rigid body may react with other molecules and some atoms (e. g. H, H2O) may be removed, so we need to reassign the intra_mol_id based on the global atom IDs
+        # rigid body may react with other molecules and some atoms (e.g. H, H2O) may be removed,
+        # so we need to reassign the intra_mol_id based on the global atom IDs
         for index, aa_id in enumerate(global_aa_ids):
             if molecule_graph.nodes[aa_id].get('intra_mol_id') is None:
                 molecule_graph.nodes[aa_id]['intra_mol_id'] = index
@@ -288,11 +294,13 @@ def embed_hybrid(
     total_pseudo_atoms = pseudo_molecule.GetNumAtoms()
 
     if total_pseudo_atoms <= large:
-        logger.info(f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) <= threshold. Invoking embed_by_etkdg.")
+        logger.info(
+            f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) <= threshold. Invoking embed_by_etkdg.")
         pseudo_conf = embed_by_etkdg(pseudo_molecule, pseudo_cg_graph, pseudo_molecule_graph, pseudo_local2atoms, box,
                                      chunks_per_d)
     else:
-        logger.info(f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) > threshold. Invoking embed_by_fragment.")
+        logger.info(
+            f"Flexible part in hybrid system ({total_pseudo_atoms} atoms) > threshold. Invoking embed_by_fragment.")
         pseudo_conf = embed_by_fragment(pseudo_molecule, pseudo_molecule_graph, pseudo_cg_graph, pseudo_local2atoms,
                                         box, chunks_per_d)
 
@@ -309,6 +317,7 @@ def embed_hybrid(
         final_full_conformer.SetAtomPosition(g_id, pbc(coord, box))
 
     return final_full_conformer
+
 
 def embed_by_fragment(
         molecule: Chem.Mol,
@@ -355,7 +364,7 @@ def embed_by_fragment(
     final_conformer = assemble_and_stitch_system(
         molecule, molecule_graph, cg_graph, local2atoms, all_local_coords, box, chunks_per_d
     )
-    #if molecule.GetNumConformers() == 0 and conf is not None:
+    # if molecule.GetNumConformers() == 0 and conf is not None:
     #    molecule.AddConformer(final_conformer, assignId=True)
     return final_conformer
 
@@ -407,70 +416,3 @@ def embed_by_etkdg(
     return assemble_and_stitch_system(
         molecule, molecule_graph, cg_molecule, local2atoms, all_local_coords, box, chunk_per_d
     )
-
-
-
-def embed_molecule(
-        molecule: Chem.Mol,
-        cg_molecule: nx.Graph,
-        molecule_graph: nx.Graph,
-        box: np.ndarray = None,
-        large: int = 500,
-        chunk_per_d: int = 1
-) -> Tuple[Chem.Mol, nx.Graph]:
-    """
-    The Ultimate Top-Level Orchestrator. Standardizes topology maps, routes the system
-    to specialized solvers based on explicit rigidity modes ('FLEXIBLE', 'RIGID', 'HYBRID'),
-    updates all properties, and returns both objects.
-    """
-    global2local, local2atoms = analyze_topology(molecule_graph, cg_molecule)
-
-    if box is None:
-        cg_coords = np.array([d['x'] for n, d in cg_molecule.nodes(data=True) if 'x' in d])
-        min_coords = cg_coords.min(axis=0)
-        max_coords = cg_coords.max(axis=0)
-        span = max_coords - min_coords
-        box = span + 100.0
-
-        logger.warning(
-            f"Simulation box bounds missing. Dynamically guessed bounding box from CG coordinates: "
-            f"[{box[0]:.2f}, {box[1]:.2f}, {box[2]:.2f}] Å (with 50Å padding)."
-        )
-
-    rigidity_mode = cg_molecule.graph.get('rigidity', 'FLEXIBLE')
-
-    if rigidity_mode == 'RIGID':
-        logger.info("Embedding pure rigid system...")
-        conf = embed_rigid(molecule, cg_molecule, box)
-
-    elif rigidity_mode == 'HYBRID':
-        logger.info("Embedding hybrid/grafting system with mixed rigid and flexible components...")
-        conf = embed_hybrid(molecule, molecule_graph, cg_molecule, local2atoms, box, large, chunk_per_d)
-
-    elif rigidity_mode == 'FLEXIBLE':
-        logger.info("Embedding flexible system...")
-        if molecule.GetNumAtoms() <= large:
-            logger.info(f"System size ({molecule.GetNumAtoms()} atoms) <= threshold ({large}). Routing to embed_by_etkdg.")
-            conf = embed_by_etkdg(molecule, cg_molecule, molecule_graph, local2atoms, box, chunk_per_d)
-        else:
-            logger.info(f"System size ({molecule.GetNumAtoms()} atoms) > threshold ({large}). Routing to embed_by_fragment.")
-            conf = embed_by_fragment(molecule, molecule_graph, cg_molecule, local2atoms, box, chunk_per_d)
-    else:
-        raise ValueError(f"Unknown rigidity mode tag encountered in global config: '{rigidity_mode}', expected one of ['FLEXIBLE', 'RIGID', 'HYBRID'].")
-
-    if conf is not None:
-        if molecule.GetNumConformers() > 0:
-            molecule.RemoveAllConformers()
-
-        molecule.AddConformer(conf, assignId=True)
-
-        for atom in molecule.GetAtoms():
-            a_id = atom.GetIdx()
-            pos = conf.GetAtomPosition(a_id)
-            molecule_graph.nodes[a_id]['x'] = np.array([pos.x, pos.y, pos.z])
-
-        logger.info("Successfully bound Conformer properties and mapped 'x' tensor coordinates into the graph.")
-    else:
-        logger.error("Failed to generate valid geometric parameters across all available workshops.")
-
-    return molecule, molecule_graph

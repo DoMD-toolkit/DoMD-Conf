@@ -1,11 +1,12 @@
-from typing import Union, Any, Dict, List, Tuple, Set
+from typing import Any, Dict, List, Tuple, Set
+
 import networkx as nx
-import numpy as np
+import numba as nb
 from rdkit import Chem
 from rdkit.Chem import AllChem
-from misc.logger import logger
 from scipy.stats import circmean
-import numba as nb
+
+from misc.logger import logger
 
 
 @nb.jit(nopython=True)
@@ -20,6 +21,7 @@ def pbc(x, l):
             float or np.ndarray: The wrapped coordinate within [-l/2, l/2].
     """
     return x - l * np.rint(x / l)
+
 
 def __get_best_alignment(coords_A, coords_B, box):
     """Aligns point cloud B (mobile, e.g., AA) to reference point cloud A (target, e.g., CG)
@@ -90,7 +92,6 @@ def get_best_alignment(coords_A, coords_B, box, paired_A=None, paired_B=None):
     """
     D_dim = coords_A.shape[1]
 
-
     # -----------------------------------------------------------------
     # 🔥 Kabsch Algorithm for Exact Point-to-Point Alignment (Supervised Mode)
     # -----------------------------------------------------------------
@@ -152,6 +153,7 @@ def get_best_alignment(coords_A, coords_B, box, paired_A=None, paired_B=None):
             R = VA @ np.diag(signs) @ VB.T
 
         return R, comA
+
 
 def rotate_confs(pos, R, box, com_TP):
     """Applies a rotation and translation to a set of coordinates under PBC.
@@ -349,6 +351,7 @@ def build_isolated_fragment(
     fragment_h = Chem.AddHs(fragment)
     return fragment, global_to_frag_map
 
+
 def _embed_with_chirality_check(
         fragment: Chem.RWMol,
         global_molecule: Chem.Mol,
@@ -456,5 +459,3 @@ def generate_local_fragment_coords(
         local_coords[g_id] -= com_vector
 
     return local_coords
-
-

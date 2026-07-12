@@ -1,11 +1,6 @@
-import pickle
-from typing import List, Union
-
-import networkx as nx
 import tqdm
 from rdkit import Chem
-from rdkit.Geometry import Point3D
-from misc.parser import mols_to_nxgraphs, nxgraphs_to_mols
+
 
 def write_mols_to_sdf(mols, output_path, force_v3000=True):
     """
@@ -31,4 +26,3 @@ def write_mols_to_sdf(mols, output_path, force_v3000=True):
 
     # Crucial: Always close the stream to flush buffer and finalize the file structure
     writer.close()
-

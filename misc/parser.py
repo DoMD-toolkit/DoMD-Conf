@@ -1,20 +1,21 @@
 import os
-import numpy as np
-import networkx as nx
 from typing import Dict, List, Tuple, Any, Union
-from misc.logger import logger
-from misc.io.xml import XmlParser
-import gsd.hoomd
-from rdkit import Chem
-import tqdm
 
+import gsd.hoomd
+import networkx as nx
+import numpy as np
+import tqdm
+from rdkit import Chem
+
+from misc.io.xml import XmlParser
+from misc.logger import logger
 
 bondorder_to_type = {
-        0: Chem.rdchem.BondType.UNSPECIFIED,
-        1: Chem.rdchem.BondType.SINGLE,
-        1.5:Chem.rdchem.BondType.AROMATIC,
-        2:Chem.rdchem.BondType.DOUBLE,
-        3:Chem.rdchem.BondType.TRIPLE
+    0: Chem.rdchem.BondType.UNSPECIFIED,
+    1: Chem.rdchem.BondType.SINGLE,
+    1.5: Chem.rdchem.BondType.AROMATIC,
+    2: Chem.rdchem.BondType.DOUBLE,
+    3: Chem.rdchem.BondType.TRIPLE
 }
 
 
@@ -34,32 +35,32 @@ def mols_to_nxgraphs(molecules: List[Union[Chem.Mol, Chem.RWMol]]):
             List[nx.Graph]: A list of NetworkX graphs representing the molecules.
     """
     mols_meta = []
-    for mol in tqdm.tqdm(molecules,total=len(molecules),desc='converting Chem.Mol to nx.Graph',disable=True):
+    for mol in tqdm.tqdm(molecules, total=len(molecules), desc='converting Chem.Mol to nx.Graph', disable=True):
         mol_meta = nx.Graph()
         nodes = set()
         tqdm_show = True
-        #if mol.GetNumAtoms() > 5000:
+        # if mol.GetNumAtoms() > 5000:
         #    tqdm_show = True
         has_body = False
         rigid_groups = {}
-        for ai in tqdm.tqdm(mol.GetAtoms(),total=mol.GetNumAtoms(),desc='adding atoms',disable=tqdm_show):
+        for ai in tqdm.tqdm(mol.GetAtoms(), total=mol.GetNumAtoms(), desc='adding atoms', disable=tqdm_show):
             i = ai.GetIdx()
             if i not in nodes:
                 body_id = ai.GetIntProp('body_id') if ai.HasProp('body_id') else -1
-                mol_meta.add_node(i, element =ai.GetSymbol(),
-                                     atomic_num = ai.GetAtomicNum(),
-                                     mass =ai.GetMass(),
-                                     formal_charge =ai.GetFormalCharge(),
-                                     is_aromatic=ai.GetIsAromatic(),
-                                     res_name =ai.GetProp('res_name'),
-                                     res_id =ai.GetIntProp('res_id'),
-                                     global_res_id =ai.GetIntProp('global_res_id'),
-                                     chiral_tag = ai.GetChiralTag(),
-                                     hybridization = ai.GetHybridization(),
-                                     radical_electrons = ai.GetNumRadicalElectrons(),
-                                     isotope = ai.GetIsotope(),
-                                     body_id= body_id
-                                )
+                mol_meta.add_node(i, element=ai.GetSymbol(),
+                                  atomic_num=ai.GetAtomicNum(),
+                                  mass=ai.GetMass(),
+                                  formal_charge=ai.GetFormalCharge(),
+                                  is_aromatic=ai.GetIsAromatic(),
+                                  res_name=ai.GetProp('res_name'),
+                                  res_id=ai.GetIntProp('res_id'),
+                                  global_res_id=ai.GetIntProp('global_res_id'),
+                                  chiral_tag=ai.GetChiralTag(),
+                                  hybridization=ai.GetHybridization(),
+                                  radical_electrons=ai.GetNumRadicalElectrons(),
+                                  isotope=ai.GetIsotope(),
+                                  body_id=body_id
+                                  )
                 if body_id >= 0:
                     has_body = True
                     mol_meta.nodes[i]['intra_mol_id'] = ai.GetIntProp('intra_mol_id')
@@ -67,18 +68,19 @@ def mols_to_nxgraphs(molecules: List[Union[Chem.Mol, Chem.RWMol]]):
                         rigid_groups[body_id] = set()
                     rigid_groups[body_id].add(i)
                     if ai.HasProp('x') and ai.HasProp('y') and ai.HasProp('z'):
-                        mol_meta.nodes[i]['pos'] = np.array([float(ai.GetProp('x')), float(ai.GetProp('y')), float(ai.GetProp('z'))])*0.0001
+                        mol_meta.nodes[i]['pos'] = np.array(
+                            [float(ai.GetProp('x')), float(ai.GetProp('y')), float(ai.GetProp('z'))]) * 0.0001
         if has_body:
             mol_meta.graph['is_rigid'] = True
         mol_meta.graph['rigid_groups'] = {k: list(v) for k, v in rigid_groups.items()}
-        for bond in tqdm.tqdm(mol.GetBonds(),total=mol.GetNumBonds(),desc='adding bonds', disable=tqdm_show):
+        for bond in tqdm.tqdm(mol.GetBonds(), total=mol.GetNumBonds(), desc='adding bonds', disable=tqdm_show):
             ai, aj = bond.GetBeginAtom(), bond.GetEndAtom()
             i, j = ai.GetIdx(), aj.GetIdx()
             mol_meta.add_edge(i, j, bond_type=bond.GetBondType(),
-                                    bondorder = bond.GetBondTypeAsDouble(),
-                                    bond_stereo = bond.GetStereo(),
-                                    bond_dir = bond.GetBondDir(),
-                                    stereo_atoms = list(bond.GetStereoAtoms()))
+                              bondorder=bond.GetBondTypeAsDouble(),
+                              bond_stereo=bond.GetStereo(),
+                              bond_dir=bond.GetBondDir(),
+                              stereo_atoms=list(bond.GetStereoAtoms()))
         mols_meta.append(mol_meta)
     return mols_meta
 
@@ -141,10 +143,10 @@ def nxgraphs_to_mols(mols_meta: List[nx.Graph]):
             bond = mol.GetBondBetweenAtoms(n_to_aid[i], n_to_aid[j])
             if edges[(i, j)].get('bond_dir') is not None:
                 bond.SetBondDir(edges[(i, j)]['bond_dir'])
-            #if (b.bond_stereo in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOE)) and (
+            # if (b.bond_stereo in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOE)) and (
             #                len(b.stereo_atoms) == 2):
             if ((edges[(i, j)].get('bond_stereo') is not None) and (edges[(i, j)].get('stereo_atoms') is not None)
-                    and (len(edges[(i, j)]['stereo_atoms']) == 2)) \
+                and (len(edges[(i, j)]['stereo_atoms']) == 2)) \
                     and (edges[(i, j)]['bond_stereo'] in (Chem.BondStereo.STEREOZ, Chem.BondStereo.STEREOE)):
                 bond.SetStereo(edges[(i, j)]['bond_stereo'])
 
@@ -155,7 +157,6 @@ def nxgraphs_to_mols(mols_meta: List[nx.Graph]):
         Chem.SanitizeMol(mol)
         molecules.append(mol)
     return molecules
-
 
 
 def post_process_aa_mol(rdmol, box_tensor):
@@ -170,7 +171,9 @@ def post_process_aa_mol(rdmol, box_tensor):
     :return:
         Chem.Mol: The processed RDKit molecule with updated properties.
     """
-    box_tensor = [str(l) for l in box_tensor] + ['0']*(9 - len(box_tensor)) if len(box_tensor) < 9 else [str(l) for l in box_tensor]
+    box_tensor = [str(l) for l in box_tensor] + ['0'] * (9 - len(box_tensor)) if len(box_tensor) < 9 else [str(l) for l
+                                                                                                           in
+                                                                                                           box_tensor]
     box_tensor_str = ' '.join(box_tensor)
     res_name = []
     res_id = []
@@ -202,6 +205,7 @@ def sdf_load_all_as_one(input_path):
             rd_combined_mol = Chem.CombineMols(rd_combined_mol, mol)
     return rd_combined_mol
 
+
 def molecule_reader(input_path):
     if input_path.endswith('.sdf'):
         rdmol = sdf_load_all_as_one(input_path)
@@ -211,6 +215,7 @@ def molecule_reader(input_path):
     else:
         raise ValueError(f"Unsupported file format: {input_path}. Only .sdf and .pdb for AA are supported.")
     return rdmol
+
 
 def _extract_raw_data_from_xml(xml_path: str) -> Tuple[Dict[str, Any], np.ndarray]:
     """Extracts positions, bonds, types, and bodies from XML."""
@@ -301,6 +306,7 @@ def _build_global_system_graph(raw_data: Dict[str, Any], reactants_config: Dict[
 
     return cg_sys
 
+
 def _final_all_rigid_id(cg_mol: nx.Graph) -> List[int]:
     """Returns a list of unique rigid body IDs present in the molecular graph."""
     return list(set(node_data['body'] for _, node_data in cg_mol.nodes(data=True) if node_data['body'] >= 0))
@@ -320,6 +326,7 @@ def _extract_chem_complete_submol(orig_mol: Chem.Mol, seed_atom_indices: list) -
     sub_mol = rw_mol.GetMol()
     return sub_mol
 
+
 def parse_body_configs(body_configs: Dict[str, Any]) -> Dict[int, Dict[str, Any]]:
     """Converts body_configs from string keys to integer body_id keys."""
     parsed_configs = {}
@@ -336,7 +343,9 @@ def parse_body_configs(body_configs: Dict[str, Any]) -> Dict[int, Dict[str, Any]
 
     return parsed_configs
 
-def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body_configs, use_extract_submol=False) -> List[nx.Graph]:
+
+def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body_configs, use_extract_submol=False) -> \
+List[nx.Graph]:
     """Segments the unified system graph into isolated molecule graphs and cleans metadata tags."""
     cg_mols = []
     # Extract independent components (shadow edges ensure rigid networks and grafts cluster perfectly)
@@ -405,8 +414,8 @@ def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body
                         smarts = f'[{atom.GetSymbol()}]'
                         rigid_frag_mol = Chem.MolFromSmarts(smarts)
                     else:
-                        logger.error(f"No valid SMARTS or SMILES provided for reaction bead {local_cg_idx} in body_id {body_id}. Please check the mapping configuration.")
-
+                        logger.error(
+                            f"No valid SMARTS or SMILES provided for reaction bead {local_cg_idx} in body_id {body_id}. Please check the mapping configuration.")
 
                     if rigid_frag_mol is not None:
                         if use_extract_submol:
@@ -446,8 +455,6 @@ def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body
         total_nodes_count = len(sorted_all_nodes)
         rigid_nodes_count = sum(len(tags) for tags in rigid_groups.values())
 
-
-
         # 2. 三路分流：精准确立分子的宏观刚性架构模式 (Rigidity Mode)
         if rigid_nodes_count == 0:
             # 状态 0：纯柔性分子
@@ -468,13 +475,13 @@ def _segment_and_purify_molecules(cg_sys: nx.Graph, box_tensor: np.ndarray, body
             subgraph.graph['body_id'] = _final_all_rigid_id(subgraph)
             subgraph.graph['rigid_groups'] = rigid_groups
 
-
         # 3. 记录刚体的主导化学类型
         if primary_type:
             subgraph.graph['type'] = primary_type
         cg_mols.append(subgraph)
 
     return cg_mols
+
 
 def _set_rigid_files(cg_mols, rigid_configs):
     """Sets the file paths for rigid molecules in the molecular graphs."""
@@ -488,17 +495,20 @@ def _set_rigid_files(cg_mols, rigid_configs):
                         rigid_files[body_id] = file_path
                     else:
                         logger.error(f"No file path specified for rigid body_id {body_id}.")
-                        raise ValueError(f"Missing file path for rigid body_id {body_id}. Please provide a valid file in rigid_configs.")
+                        raise ValueError(
+                            f"Missing file path for rigid body_id {body_id}. Please provide a valid file in rigid_configs.")
                 else:
                     logger.error(f"Rigid body_id {body_id} not found in rigid_configs.")
-                    raise ValueError(f"Rigid body_id {body_id} is missing in rigid_configs. Please ensure all rigid bodies are defined.")
+                    raise ValueError(
+                        f"Rigid body_id {body_id} is missing in rigid_configs. Please ensure all rigid bodies are defined.")
             cg_mol.graph['rigid_files'] = rigid_files
     return cg_mols
+
 
 def parse_cg_topology(
         cg_configuration_file: str,
         reactants_config: Dict[str, Any],
-        rigid_configs: Dict[int, Any]=None,
+        rigid_configs: Dict[int, Any] = None,
 ) -> Tuple[List[nx.Graph], np.ndarray]:
     """
     Unified Coarse-Grained Topology Parser Workshop.

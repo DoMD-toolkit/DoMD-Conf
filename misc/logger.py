@@ -1,6 +1,5 @@
 import logging
 import os
-import sys
 from contextlib import contextmanager
 
 logger_format = '%(asctime)s [%(levelname)s] %(name)s (%(filename)s:%(lineno)d): %(message)s'
@@ -40,6 +39,7 @@ class DuplicateFilter:
 logger = get_logger("task_logger")
 logger.setLevel(logging.INFO)
 logger.propagate = False
+
 
 # if not any(isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler) for h in logger.handlers):
 #     console_handler = logging.StreamHandler(sys.stdout)

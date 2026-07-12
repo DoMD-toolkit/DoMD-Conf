@@ -6,12 +6,14 @@
 
 from collections import namedtuple
 
-from rdkit.Chem import rdChemReactions
 from rdkit import Chem
+from rdkit.Chem import rdChemReactions
+
 atom_info = namedtuple('atom_info',
                        ('reactant_id', 'reactant_atom_id', 'product_id', 'product_atom_id', 'atomic_number'))
 bond_info = namedtuple('bond_info',
-                       ('product_id', 'product_atoms_id', 'reactants_id', 'reactant_atoms_id', 'bond_type', 'bond_stereo', 'bond_dir', 'stereo_atoms', 'status'))
+                       ('product_id', 'product_atoms_id', 'reactants_id', 'reactant_atoms_id', 'bond_type',
+                        'bond_stereo', 'bond_dir', 'stereo_atoms', 'status'))
 
 
 def process_reactants(reactants):
@@ -55,16 +57,16 @@ def atom_map(products, reaction):
     amap, reacting_atoms = map_atoms(products, reacting_map)
     return amap, reacting_atoms
 
+
 def bond_map(reactants: list, products: list, reaction: rdChemReactions.ChemicalReaction, smarts: str) -> list:
     amap, reacting_atoms = atom_map(products, reaction)
-    #print(smarts)
+    # print(smarts)
     reactants_smarts, products_smarts = smarts.split('>>')
     reactants_smarts = reactants_smarts.split('.')
     prods_smarts = products_smarts.split('.')
 
     r2p = {(m.reactant_id, m.reactant_atom_id): (m.product_id, m.product_atom_id) for m in amap}
     p2r = {(m.product_id, m.product_atom_id): (m.reactant_id, m.reactant_atom_id) for m in amap}
-
 
     rpatts = {m.reactant_id: Chem.MolFromSmarts(reactants_smarts[m.reactant_id]) for m in amap}
     ppatts = {m.product_id: Chem.MolFromSmarts(prods_smarts[m.product_id]) for m in amap}
@@ -84,13 +86,14 @@ def bond_map(reactants: list, products: list, reaction: rdChemReactions.Chemical
                 pn_idx = pn.GetIdx()
                 if rn_idx not in rsubmatches[m.reactant_id] or pn_idx not in psubmatches[m.product_id]:
                     continue
-                #if p2r.get((m.product_id, pn.GetIdx())) is not None or p2r.get((m.product_id, pn.GetIdx()))[0] != m.reactant_id:
+                # if p2r.get((m.product_id, pn.GetIdx())) is not None or p2r.get((m.product_id, pn.GetIdx()))[0] != m.reactant_id:
                 #    continue
-                if (m.product_id, pn.GetIdx()) not in p2r and rn.GetAtomicNum() == pn.GetAtomicNum() and rn.GetIsAromatic() == pn.GetIsAromatic():
-                #if (m.product_id, pn.GetIdx()) not in p2r and :
+                if (m.product_id,
+                    pn.GetIdx()) not in p2r and rn.GetAtomicNum() == pn.GetAtomicNum() and rn.GetIsAromatic() == pn.GetIsAromatic():
+                    # if (m.product_id, pn.GetIdx()) not in p2r and :
                     r_key = (m.reactant_id, rn.GetIdx())
                     p_key = (m.product_id, pn.GetIdx())
-                    #print(f"Mapping untagged neighbor: Reactant {r_key} -> Product {p_key} (Element: {rn.GetSymbol()})")
+                    # print(f"Mapping untagged neighbor: Reactant {r_key} -> Product {p_key} (Element: {rn.GetSymbol()})")
                     r2p[r_key] = p_key
                     p2r[p_key] = r_key
                     break
@@ -140,4 +143,3 @@ def bond_map(reactants: list, products: list, reaction: rdChemReactions.Chemical
                     res.append(bond_info(ip, (a, b), (rid_a, rid_b), (raid_a, raid_b), t, s, bdir, satoms, 'changed'))
 
     return res
-

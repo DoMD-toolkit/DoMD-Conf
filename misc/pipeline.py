@@ -1,14 +1,17 @@
-import numpy as np
-from rdkit import Chem
 import logging
-from domd_xyz.embed_molecule import embed_molecule
+
 from domd_topology.topology_builder import topology_builder
-from misc.parser import post_process_aa_mol, parse_cg_topology
+from rdkit import Chem
+
+from embed_molecule import embed_molecule
 from misc.io.sdf import write_mols_to_sdf
+from misc.parser import post_process_aa_mol, parse_cg_topology
+
 logger = logging.getLogger(__name__)
 
 
-def run_sdf_mode(mols_config, reaction_template, cg_file_path, rigid_configs=None, reactions=None, large=500, chunks_per_d=1, output_sdf_path='final_aa_mols.sdf'):
+def run_sdf_mode(mols_config, reaction_template, cg_file_path, rigid_configs=None, reactions=None, large=500,
+                 chunks_per_d=1, output_sdf_path='final_aa_mols.sdf'):
     """
     Lightweight wrapper to reconstruct AA topology from CG system,
     generate 3D conformers, and inject essential metadata.
@@ -28,7 +31,6 @@ def run_sdf_mode(mols_config, reaction_template, cg_file_path, rigid_configs=Non
     """
     logger.info('Parsing CG XML and extracting box dimensions...')
 
-
     cg_mols, box_tensor = parse_cg_topology(cg_file_path, mols_config, rigid_configs=rigid_configs)
     # 5. Serial 3D coordinate embedding and metadata injection
     final_rdmols = []
@@ -36,16 +38,19 @@ def run_sdf_mode(mols_config, reaction_template, cg_file_path, rigid_configs=Non
 
     for i, cg_mol in enumerate(cg_mols):
         # Topology building
-        aa_mol_h, aa_graph = topology_builder(mols_config, reaction_template, rigid_configs=rigid_configs, cg_graph=cg_mol, reactions=reactions, mol_idx=i)
+        aa_mol_h, aa_graph = topology_builder(mols_config, reaction_template, rigid_configs=rigid_configs,
+                                              cg_graph=cg_mol, reactions=reactions, mol_idx=i)
         # Molecule embedding (using default safe thresholds for large systems)
-        aa_mol_h, aa_graph = embed_molecule(aa_mol_h, cg_mol, aa_graph, box=box_tensor, large=large, chunk_per_d=chunks_per_d)
+        aa_mol_h, aa_graph = embed_molecule(aa_mol_h, cg_mol, aa_graph, box=box_tensor, large=large,
+                                            chunk_per_d=chunks_per_d)
         # SDF format post processing, inject metadata: resname, res_id, box_tensor
         aa_mol_h = post_process_aa_mol(aa_mol_h, box_tensor)
         final_rdmols.append(aa_mol_h)
         final_graphs.append(aa_graph)
-        logger.info(f'Successfully processed molecule {i+1} / {len(cg_mols)}')
+        logger.info(f'Successfully processed molecule {i + 1} / {len(cg_mols)}')
     write_mols_to_sdf(final_rdmols, output_sdf_path, force_v3000=True)
     return final_rdmols, final_graphs
+
 
 def run_xyz_mode(aa_mol, cg_mol, aa_graph, box_tensor, large=500, chunks_per_d=1, output_sdf_path='aa_mol.sdf'):
     """
@@ -70,6 +75,8 @@ def run_xyz_mode(aa_mol, cg_mol, aa_graph, box_tensor, large=500, chunks_per_d=1
     write_mols_to_sdf([aa_mol], output_sdf_path, force_v3000=True)
     return aa_mol, aa_graph
 
+
 def run_topo_mode(mols_config, reaction_template, cg_mol, rigid_configs=None, reactions=None):
-    aa_mol_h, aa_graph = topology_builder(mols_config, reaction_template, rigid_configs=rigid_configs, cg_graph=cg_mol, reactions=reactions)
+    aa_mol_h, aa_graph = topology_builder(mols_config, reaction_template, rigid_configs=rigid_configs, cg_graph=cg_mol,
+                                          reactions=reactions)
     return aa_mol_h, aa_graph

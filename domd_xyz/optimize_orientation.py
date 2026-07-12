@@ -56,7 +56,7 @@ def optimization_by_chunk(chunk_per_d, connections, pos, local_frame_idx, trans,
     for cid in cid_set:
         hash_ = (r1_cid == cid) + (r2_cid == cid)
         cid_hash[cid] = hash_
-    #print(cid_hash)
+    # print(cid_hash)
     cid_meta = {}
     for cid in cid_hash:
         hash_ = cid_hash[cid]
@@ -66,16 +66,16 @@ def optimization_by_chunk(chunk_per_d, connections, pos, local_frame_idx, trans,
             in_chunk_res_idx.add(i)
             in_chunk_res_idx.add(j)
         in_chunk_res_idx = np.sort(list(in_chunk_res_idx))
-        #print(in_chunk_res_idx)
+        # print(in_chunk_res_idx)
         if len(in_chunk_res_idx) == 0:
             in_chunk_res_idx = []
             continue
-        local_to_global = {i: gid for i, gid in enumerate(in_chunk_res_idx)} #if in_chunk_res_idx is not None else {}
-        global_to_local = {gid: i for i, gid in enumerate(in_chunk_res_idx)} #if in_chunk_res_idx is not None else {}
+        local_to_global = {i: gid for i, gid in enumerate(in_chunk_res_idx)}  # if in_chunk_res_idx is not None else {}
+        global_to_local = {gid: i for i, gid in enumerate(in_chunk_res_idx)}  # if in_chunk_res_idx is not None else {}
         in_chunk_connections = np.array([[global_to_local[i], global_to_local[j]] for i, j in connections_])
-        #print(rot.shape,print(rot[[]]))
+        # print(rot.shape,print(rot[[]]))
         cid_meta[cid] = {'connections_': in_chunk_connections, 'local_frame_idx': local_frame_idx[hash_],
-                         'n_residue': len(in_chunk_res_idx) ,
+                         'n_residue': len(in_chunk_res_idx),
                          'rot': rot[in_chunk_res_idx].ravel(), 'local_to_global': local_to_global,
                          'connections': connections_}
     return cid_set, cid_meta, cid_hash
@@ -107,6 +107,7 @@ def pbc_torch(r, d):
     """
     return r - d * torch.floor(r / d + 0.5)
 
+
 def constraint_det(x):
     """Calculates the determinant constraint error for rotation matrices.
 
@@ -123,19 +124,21 @@ def constraint_det(x):
     """
     N = x.size // 9
     R = x.reshape(N, 3, 3)
-    
+
     r0, r1, r2 = R[:, 0], R[:, 1], R[:, 2]
-    
+
     cross_12 = np.cross(r1, r2, axis=1)
     dets = np.einsum('ij,ij->i', r0, cross_12)
-    
-    return np.sum((dets - 1.0)**2)
 
-def constraint_det_jac_(R): # Only the second part
+    return np.sum((dets - 1.0) ** 2)
+
+
+def constraint_det_jac_(R):  # Only the second part
     R = R.reshape(-1, 3, 3)
     det = np.linalg.det(R)
     inv = np.linalg.pinv(R)
     return 2 * det[:, None, None] * (det[:, None, None] - 1) * np.swapaxes(inv, (1, 2))
+
 
 def constraint_det_jac(x):
     r"""Calculates the analytical Jacobian of the determinant constraint.
@@ -163,18 +166,20 @@ def constraint_det_jac(x):
     dets = np.einsum('ij,ij->i', r0, grad_r0)
 
     diff = dets - 1.0
-    factor = 2 * diff[:, np.newaxis] # (N, 1) 用于广播
+    factor = 2 * diff[:, np.newaxis]  # (N, 1) 用于广播
     final_grad_r0 = factor * grad_r0
     final_grad_r1 = factor * grad_r1
     final_grad_r2 = factor * grad_r2
 
     return np.stack([final_grad_r0, final_grad_r1, final_grad_r2], axis=1).reshape(-1)
 
+
 cons_det = {
     'type': 'eq',
     'fun': constraint_det,
-    'jac': constraint_det_jac  
+    'jac': constraint_det_jac
 }
+
 
 def rot_cons(rot0):
     """Calculates the orthogonality constraint error.
@@ -207,7 +212,7 @@ def rot_cons_jac(rot0):
     return np.nan_to_num(a, nan=0)  # 4 * np.einsum('ijk, ikl->ijl', rot, b).ravel()
 
 
-cons = ({'type': 'eq', 'fun': rot_cons, 'jac': rot_cons_jac, },cons_det)
+cons = ({'type': 'eq', 'fun': rot_cons, 'jac': rot_cons_jac, }, cons_det)
 # cons = ({'type': 'ineq', 'fun': rot_cons, },)
 
 Meta = namedtuple("Meta", "bonds trans_v local_x atom_pos atom_res_id box")

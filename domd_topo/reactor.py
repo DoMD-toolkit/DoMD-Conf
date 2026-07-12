@@ -1,15 +1,15 @@
 from itertools import permutations
 from typing import Any, Union
+
 import networkx as nx
 import tqdm
 from rdkit import Chem
 from rdkit.Chem import rdChemReactions
 
 from misc.logger import logger
+from misc.parser import mols_to_nxgraphs, molecule_reader
 from ._mapping import process_reactants, atom_map, bond_map
 from .functions import set_molecule_id_for_h
-from misc.parser import mols_to_nxgraphs, molecule_reader
-import numpy as np
 
 
 def reaction_mol_mapping(reactions: list[tuple]) -> dict[int, set]:
@@ -31,6 +31,7 @@ def reaction_mol_mapping(reactions: list[tuple]) -> dict[int, set]:
                 reaction_hash[rid] = set()
             reaction_hash[rid].add(r)
     return reaction_hash
+
 
 def reaction_mol_mapping_(reactions: list[tuple], cg_molecules: list[nx.Graph]) -> dict[int, list]:
     """Maps reactions to specific Coarse-Grained (CG) molecules.
@@ -72,6 +73,7 @@ class Reaction(object):
             prod_idx (int, optional): Index of the main product in the reaction definition.
             reaction_maps (dict): Cache of pre-calculated atom/bond mappings.
     """
+
     def __init__(self, name, cg_reactant_list, smarts, prod_idx=None):
         """Initializes the Reaction object.
 
@@ -112,16 +114,6 @@ class Reaction(object):
                 bmap = bond_map(reactants, product, self.reaction, self.smarts)
                 self.reaction_maps[cg_reactants].append((reacting_atoms, amap, bmap))
 
-#def allowed_p_(reacted_atoms, cg_reactants, reaction):
-#    for reaction_map in reaction.reaction_maps.get(cg_reactants):
-#        allowed = True
-#        for ri in reaction_map[0]:
-#            if set.intersection(set(reaction_map[0][ri]), reacted_atoms[ri]):
-#                allowed = False
-#        if allowed:
-#            return reaction_map, reaction.prod_idx
-#    return None, None  # if no available reaction is chosen.
-
 
 def allowed_p(reacted_atoms, cg_reactants, reaction):
     """Determines if a specific reaction pathway is allowed based on atom availability.
@@ -139,11 +131,9 @@ def allowed_p(reacted_atoms, cg_reactants, reaction):
             tuple: A tuple (reaction_map, prod_idx) if allowed, otherwise (None, None).
     """
     for reaction_map in reaction.reaction_maps.get(cg_reactants):
-        #print(reaction.reaction_maps)
         allowed = True
         for ri in reaction_map[0]:
-            #print(set(reaction_map[0][ri]), reacted_atoms[ri], reaction_map[0], ri)
-            if not set(reaction_map[0][ri]).symmetric_difference(reacted_atoms[ri]):#not necessarily subset,e.g.
+            if not set(reaction_map[0][ri]).symmetric_difference(reacted_atoms[ri]):  # not necessarily subset,e.g.
                 # reaction 1 takes {0,1},{10,11} but reaction 2 takes {0,1,2,3},{10,11,12,13}
                 # if reaction 1 happened with (0,1} already, reacted atoms has intersection with
                 # reaction 2
@@ -151,12 +141,28 @@ def allowed_p(reacted_atoms, cg_reactants, reaction):
                 # only idle function groups
                 # multi-step reaction info are considered as reaction info with all reactants in one step.
                 # FOR ANY ATOM, THERE IS ONLY ONE REACTION, therefore intersection is fine.
-                allowed =False
-        #print('-')
+                allowed = False
         if allowed:
-            #print(set(reaction_map[0][ri]), reacted_atoms[ri], reaction_map[0], ri)
             return reaction_map, reaction.prod_idx
-    return None, None  # if no available reaction is chosen.
+    return None, None
+
+
+def post_process(aa_mol: Union[Chem.Mol, Chem.RWMol]) -> tuple[Chem.Mol, nx.Graph]:
+    """Post-processes an all-atom molecule to generate its corresponding graph representation.
+
+            Args:
+                aa_mol (Union[Chem.Mol, Chem.RWMol]): The all-atom RDKit molecule.
+
+            Returns:
+                tuple: A tuple containing:
+                    - aa_mol (Chem.Mol): The processed all-atom RDKit molecule.
+                    - mol_graph (nx.Graph): Graph representation of the molecule with atom and bond properties.
+    """
+    Chem.SanitizeMol(aa_mol)
+    aa_mol_h = Chem.AddHs(aa_mol)
+    set_molecule_id_for_h(aa_mol_h)
+    mol_graph = mols_to_nxgraphs([aa_mol_h])[0]
+    return aa_mol_h, mol_graph
 
 
 class Reactor(object):
@@ -172,6 +178,7 @@ class Reactor(object):
             reactants_meta (dict): Metadata for reactants (SMILES, file paths).
             reaction_templates (dict): Dictionary of Reaction objects.
     """
+
     def __init__(self, reactants_meta: dict[str, dict[str, str]], reaction_templates: dict[str, dict[str, Any]]):
         self.reactants_meta = reactants_meta
         # self.cg_molecules = None
@@ -184,7 +191,7 @@ class Reactor(object):
                 reaction_name, _info['cg_reactant_list'], _info['smarts'], _info.get("prod_idx")
             )
 
-    def process(self, cg_mol:nx.Graph, reactions:list, mol_idx=0) -> tuple[Chem.Mol, nx.Graph]:
+    def process(self, cg_mol: nx.Graph, reactions: list, mol_idx=0) -> tuple[Chem.Mol, nx.Graph]:
         """Processes a single CG molecule to generate its All-Atom structure.
 
                 Args:
@@ -206,7 +213,7 @@ class Reactor(object):
         rigid_nodes = set()
         non_rigid_nodes = set()
         for n in cg_mol.nodes:
-            if cg_mol.nodes[n].get('body') >=0:
+            if cg_mol.nodes[n].get('body') >= 0:
                 rigid_nodes.add(n)
             else:
                 non_rigid_nodes.add(n)
@@ -219,7 +226,7 @@ class Reactor(object):
         rigid_types = set()
         for body_id in rigid_groups:
             file = rigid_configs[body_id]['file']
-            mapping = rigid_configs[body_id]['mapping'] # react_site cg_node to rigid_mol atom_idx
+            mapping = rigid_configs[body_id]['mapping']  # react_site cg_node to rigid_mol atom_idx
             rigid_mol = molecule_reader(file)
             positions = rigid_mol.GetConformer(0).GetPositions()
 
@@ -246,22 +253,24 @@ class Reactor(object):
             global_count += rigid_mol.GetNumAtoms()
             for atom_id in range(rigid_mol.GetNumAtoms()):
                 atom = aa_mol.GetAtomWithIdx(rigid_mol_local2global[atom_id])
-                atom.SetIntProp('global_res_id', -body_id-1)
-                atom.SetIntProp('res_id', -body_id-1)
+                atom.SetIntProp('global_res_id', -body_id - 1)
+                atom.SetIntProp('res_id', -body_id - 1)
                 atom.SetIntProp('body_id', body_id)
                 atom.SetIntProp('intra_mol_id', rigid_mol_global2local[atom.GetIdx()])
                 atom.SetProp('res_name', str(cg_mol.nodes[list(rigid_nodes_)[0]].get('type')))
-                atom.SetIntProp('x', int(positions[atom_id][0]*10000))
-                atom.SetIntProp('y', int(positions[atom_id][1]*10000))
-                atom.SetIntProp('z', int(positions[atom_id][2]*10000))
+                atom.SetIntProp('x', int(positions[atom_id][0] * 10000))
+                atom.SetIntProp('y', int(positions[atom_id][1] * 10000))
+                atom.SetIntProp('z', int(positions[atom_id][2] * 10000))
             for node in rigid_nodes_:
-                local_res_id = cg_mol.nodes[node].get('intra_mol_id') # intra_mol_id is the local residue id in the rigid molecule, which is used to map to the rigid molecule atom index.
+                local_res_id = cg_mol.nodes[node].get(
+                    'intra_mol_id')  # intra_mol_id is the local residue id in the rigid molecule, which is used to map to the rigid molecule atom index.
                 rigid_type = cg_mol.nodes[node].get('type')
                 rigid_types.add(rigid_type)
                 if local_res_id in mapping:
                     rigid_frag_atom_mapping = cg_mol.nodes[node].get('frag_atom_mapping')
                     rigid_react_site_atom_id_list = sorted(mapping[local_res_id]['atom_index'])
-                    atom_idx = {rigid_frag_atom_mapping[i]: rigid_mol_local2global[rigid_react_site_atom_id_list[i]] for i in range(len(rigid_react_site_atom_id_list))}
+                    atom_idx = {rigid_frag_atom_mapping[i]: rigid_mol_local2global[rigid_react_site_atom_id_list[i]] for
+                                i in range(len(rigid_react_site_atom_id_list))}
 
                     mol_meta.add_node(node, atom_idx=atom_idx, reacting_map={}, rm_atoms=set())
                     for rigid_react_site_atom_id in rigid_react_site_atom_id_list:
@@ -349,12 +358,14 @@ class Reactor(object):
                     elif meta.get('smiles'):
                         _molecules.append(Chem.MolFromSmiles(meta['smiles']))
                     else:
-                        raise ValueError(f"Rigid reactant type '{t}' requires either 'smarts' or 'smiles' in reactants_meta, but neither was found.")
+                        raise ValueError(
+                            f"Rigid reactant type '{t}' requires either 'smarts' or 'smiles' in reactants_meta, but neither was found.")
                 else:
                     if meta.get('smiles'):
                         _molecules.append(Chem.MolFromSmiles(meta['smiles']))
                     else:
-                        raise ValueError(f"Flexible reactant type '{t}' requires 'smiles' in reactants_meta, but it was not found.")
+                        raise ValueError(
+                            f"Flexible reactant type '{t}' requires 'smiles' in reactants_meta, but it was not found.")
             rxn_tpls.build_reaction_maps(reactants_tuple, _molecules)
 
             if len(reactants_tuple) == 2:
@@ -378,9 +389,8 @@ class Reactor(object):
             if not reaction_map:
                 if not reaction_map:
                     raise (ValueError(
-                        f"{r} with order {_reactant_idx}, {_reactants_tuple} can not react! This error happens while " \
-                        f"the reacted atoms in one bead have been reacted more than once. We reconmand you use another " \
-                        f"reaction template to avoid this."))
+                        f"{r} with order {_reactant_idx}, {_reactants_tuple} can not react! This error happens while "
+                        f"the reacted atoms in one bead have been reacted more than once."))
 
             amap, bmap = reaction_map[1], reaction_map[2]  # store the reacted atoms.
             for ri, rt in enumerate(reactants):
@@ -426,7 +436,10 @@ class Reactor(object):
                         bond.SetStereo(b.bond_stereo)
 
         rm_all = []
-        for m in tqdm.tqdm(mol_meta.nodes, total=len(mol_meta.nodes), desc='set res_id and get removing atom', disable=True):
+        for m in tqdm.tqdm(mol_meta.nodes,
+                           total=len(mol_meta.nodes),
+                           desc='set res_id and get removing atom',
+                           disable=True):
             molecule = mol_meta.nodes[m]
             for idx in molecule['atom_idx'].values():
                 atom = aa_mol.GetAtomWithIdx(idx)
@@ -446,23 +459,5 @@ class Reactor(object):
         rm_all = sorted(list(set(rm_all)), reverse=True)
         for bi in tqdm.tqdm(rm_all, total=len(rm_all), desc='removing atom', disable=True):
             aa_mol.RemoveAtom(bi)
-        aa_mol_h, mol_graph = self.post_process(aa_mol)
+        aa_mol_h, mol_graph = post_process(aa_mol)
         return aa_mol_h, mol_graph
-
-    def post_process(self, aa_mol: Union[Chem.Mol, Chem.RWMol]) -> tuple[Chem.Mol, nx.Graph]:
-        """Post-processes an all-atom molecule to generate its corresponding graph representation.
-
-                Args:
-                    aa_mol (Union[Chem.Mol, Chem.RWMol]): The all-atom RDKit molecule.
-
-                Returns:
-                    tuple: A tuple containing:
-                        - aa_mol (Chem.Mol): The processed all-atom RDKit molecule.
-                        - mol_graph (nx.Graph): Graph representation of the molecule with atom and bond properties.
-        """
-        Chem.SanitizeMol(aa_mol)
-        aa_mol_h = Chem.AddHs(aa_mol)
-        set_molecule_id_for_h(aa_mol_h)
-        mol_graph = mols_to_nxgraphs([aa_mol_h])[0]
-        return aa_mol_h, mol_graph
-

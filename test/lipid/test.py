@@ -1,5 +1,6 @@
-from misc.pipeline import run_sdf_mode
 from misc.logger import logger
+from misc.pipeline import run_sdf_mode
+
 logger.setLevel('INFO')
 logger.propagate = True
 from misc.io.sdf import write_mols_to_sdf
@@ -93,23 +94,22 @@ reaction_template = {
     },
 }
 mols = {
-      'NC3': {'smiles': NC3, 'file': None, 'is_rigid':False},
-      'PO4': {'smiles': PO4, 'file': None, 'is_rigid':False},
-      'GL0': {'smiles': GL0, 'file': None, 'is_rigid':False},
-      'GL1': {'smiles': GL1, 'file': None, 'is_rigid':False},
-      'GL2': {'smiles': GL2, 'file': None, 'is_rigid':False},
-      'C1A': {'smiles': C1A, 'file': None, 'is_rigid':False},
-      'C2A': {'smiles': C2A, 'file': None, 'is_rigid':False},
-      'C3A': {'smiles': C3A, 'file': None, 'is_rigid':False},
-      'C4A': {'smiles': C4A, 'file': None, 'is_rigid':False},
-      'C5A': {'smiles': C5A, 'file': None, 'is_rigid':False},
-      'C1B': {'smiles': C1B, 'file': None, 'is_rigid':False},
-      'C2B': {'smiles': C2B, 'file': None, 'is_rigid':False},
-      'C3B': {'smiles': C3B, 'file': None, 'is_rigid':False},
-      'C4B': {'smiles': C4B, 'file': None, 'is_rigid':False},
-      'C5B': {'smiles': C5B, 'file': None, 'is_rigid':False},
+    'NC3': {'smiles': NC3, 'file': None, 'is_rigid': False},
+    'PO4': {'smiles': PO4, 'file': None, 'is_rigid': False},
+    'GL0': {'smiles': GL0, 'file': None, 'is_rigid': False},
+    'GL1': {'smiles': GL1, 'file': None, 'is_rigid': False},
+    'GL2': {'smiles': GL2, 'file': None, 'is_rigid': False},
+    'C1A': {'smiles': C1A, 'file': None, 'is_rigid': False},
+    'C2A': {'smiles': C2A, 'file': None, 'is_rigid': False},
+    'C3A': {'smiles': C3A, 'file': None, 'is_rigid': False},
+    'C4A': {'smiles': C4A, 'file': None, 'is_rigid': False},
+    'C5A': {'smiles': C5A, 'file': None, 'is_rigid': False},
+    'C1B': {'smiles': C1B, 'file': None, 'is_rigid': False},
+    'C2B': {'smiles': C2B, 'file': None, 'is_rigid': False},
+    'C3B': {'smiles': C3B, 'file': None, 'is_rigid': False},
+    'C4B': {'smiles': C4B, 'file': None, 'is_rigid': False},
+    'C5B': {'smiles': C5B, 'file': None, 'is_rigid': False},
 }
-
 
 xmlfile = 'cg.xml'
 
