@@ -2,7 +2,7 @@ from typing import Tuple
 
 import networkx as nx
 import numpy as np
-from domd_xyz.functions import embed_rigid, embed_hybrid, embed_by_etkdg, embed_by_fragment
+from domd_xyz.embedding_algorithms import embed_rigid, embed_hybrid, embed_by_etkdg, embed_by_fragment
 from rdkit import Chem
 
 from domd_xyz.embed_with_cg_xyz import (

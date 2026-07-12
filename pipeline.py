@@ -1,6 +1,6 @@
 import logging
 
-from domd_topology.topology_builder import topology_builder
+from topology_builder import topology_builder
 from rdkit import Chem
 
 from embed_molecule import embed_molecule

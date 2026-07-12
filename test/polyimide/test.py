@@ -2,7 +2,7 @@ from rdkit import Chem
 
 from embed_molecule import embed_molecule
 from misc.logger import logger
-from misc.pipeline import topology_builder
+from pipeline import topology_builder
 
 logger.setLevel('INFO')
 logger.propagate = True

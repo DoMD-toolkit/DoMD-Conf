@@ -8,8 +8,8 @@ from rdkit.Chem import rdChemReactions
 
 from misc.logger import logger
 from misc.parser import mols_to_nxgraphs, molecule_reader
-from ._mapping import process_reactants, atom_map, bond_map
-from .functions import set_molecule_id_for_h
+from domd_topo._mapping import process_reactants, atom_map, bond_map
+from domd_topo.lib import set_molecule_id_for_h
 
 
 def reaction_mol_mapping(reactions: list[tuple]) -> dict[int, set]:

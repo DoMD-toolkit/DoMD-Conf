@@ -1,5 +1,5 @@
 from misc.logger import logger
-from misc.pipeline import run_sdf_mode
+from pipeline import run_sdf_mode
 
 logger.setLevel('INFO')
 logger.propagate = True

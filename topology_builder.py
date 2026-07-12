@@ -1,6 +1,6 @@
 import os
 
-from domd_topo.functions import reactions_search
+from domd_topo.lib import reactions_search
 from rdkit import Chem
 
 from domd_topo.reactor import Reactor
